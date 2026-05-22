@@ -46,7 +46,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
       "args": ["-y", "vestlaunch-mcp"],
       "env": {
         "VESTLAUNCH_BASE_URL": "https://crm.vestlaunch.com",
-        "VESTLAUNCH_API_KEY": "vlk_..."
+        "VESTLAUNCH_API_KEY": "ffl_live_..."
       }
     }
   }
@@ -56,7 +56,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 #### Claude Code
 
 ```bash
-claude mcp add vestlaunch -- env VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com VESTLAUNCH_API_KEY=vlk_... npx -y vestlaunch-mcp
+claude mcp add vestlaunch -- env VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com VESTLAUNCH_API_KEY=ffl_live_... npx -y vestlaunch-mcp
 ```
 
 #### ClawBot or any other MCP client
@@ -121,7 +121,7 @@ npm run build
 
 # Run locally against the CRM
 VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com \
-VESTLAUNCH_API_KEY=vlk_... \
+VESTLAUNCH_API_KEY=ffl_live_... \
 npm run dev
 ```
 

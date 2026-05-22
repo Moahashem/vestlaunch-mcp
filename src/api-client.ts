@@ -65,7 +65,18 @@ export class ApiClient {
           statusCode: res.status,
         };
       }
-      return (json ?? { success: true, data: null }) as ApiResponse<T>;
+      // CRM response shape: { data: T, meta?: { total, limit, offset, ... } }
+      // We flatten meta into our success envelope for caller convenience.
+      const body = (json ?? {}) as Record<string, unknown>;
+      const meta = (body.meta && typeof body.meta === "object" ? body.meta : {}) as Record<
+        string,
+        unknown
+      >;
+      return {
+        success: true,
+        data: (body.data === undefined ? null : body.data) as T,
+        ...meta,
+      } as ApiSuccess<T>;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`request failed: ${msg}`, { path: opts.path });

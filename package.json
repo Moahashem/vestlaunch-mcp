@@ -1,0 +1,54 @@
+{
+  "name": "vestlaunch-mcp",
+  "version": "0.1.0",
+  "description": "VestLaunch CRM MCP server — manifest-driven, multi-agent. Wraps the ffl-crm /api/v1/* surface so any MCP-compatible agent (Claude, Cowork, Code, ClawBot) can read and (with explicit opt-in) write CRM data.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "vestlaunch-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ffl",
+    "flatfeelandlord",
+    "vestlaunch",
+    "crm",
+    "claude"
+  ],
+  "author": "Mo Hashem <mo@flatfeelandlord.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Moahashem/vestlaunch-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Moahashem/vestlaunch-mcp/issues"
+  },
+  "homepage": "https://github.com/Moahashem/vestlaunch-mcp#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

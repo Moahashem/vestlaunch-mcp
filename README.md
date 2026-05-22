@@ -24,7 +24,7 @@ Each agent that connects to the CRM has its own `ApiKey` row with its own scopes
 
 ### 1. Generate an API key in the CRM
 
-In `crm.flatfeelandlord.com`, go to **Settings → Integrations → API Keys** (or wherever the key UI lives — see CRM repo) and create a new key:
+In `crm.vestlaunch.com`, go to **Settings → API Keys** and create a new key:
 
 - **Name:** identify the agent (e.g. `claude-cowork-lando`, `claude-code-mac`, `clawbot-vps`)
 - **Scopes:** start with read-only — `contacts:read`, `opportunities:read`, `tasks:read`, `pipelines:read`, `campaigns:read`, `workflows:read`, `bookings:read`, `activities:read`, `*` for `/me`
@@ -45,7 +45,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
       "command": "npx",
       "args": ["-y", "vestlaunch-mcp"],
       "env": {
-        "VESTLAUNCH_BASE_URL": "https://crm.flatfeelandlord.com",
+        "VESTLAUNCH_BASE_URL": "https://crm.vestlaunch.com",
         "VESTLAUNCH_API_KEY": "vlk_..."
       }
     }
@@ -56,7 +56,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 #### Claude Code
 
 ```bash
-claude mcp add vestlaunch -- env VESTLAUNCH_BASE_URL=https://crm.flatfeelandlord.com VESTLAUNCH_API_KEY=vlk_... npx -y vestlaunch-mcp
+claude mcp add vestlaunch -- env VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com VESTLAUNCH_API_KEY=vlk_... npx -y vestlaunch-mcp
 ```
 
 #### ClawBot or any other MCP client
@@ -120,7 +120,7 @@ npm run typecheck
 npm run build
 
 # Run locally against the CRM
-VESTLAUNCH_BASE_URL=https://crm.flatfeelandlord.com \
+VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com \
 VESTLAUNCH_API_KEY=vlk_... \
 npm run dev
 ```

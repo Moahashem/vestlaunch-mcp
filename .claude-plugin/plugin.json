@@ -1,0 +1,11 @@
+{
+  "name": "vestlaunch",
+  "version": "0.1.0",
+  "description": "VestLaunch CRM MCP server — manifest-driven, multi-agent. Wraps the ffl-crm /api/v1/* surface so any MCP-compatible agent can read and (with explicit opt-in) write CRM data.",
+  "author": {
+    "name": "Mo Hashem",
+    "email": "mo@flatfeelandlord.com"
+  },
+  "homepage": "https://github.com/Moahashem/vestlaunch-mcp",
+  "license": "MIT"
+}

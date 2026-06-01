@@ -28,6 +28,12 @@ export interface McpToolDefinition {
     pathTemplate: string;
     scope: string;
     isWrite: boolean;
+    /**
+     * true  → args are FLAT (top-level), routed to path/query/body by name+method
+     *         (used when the manifest published an inputSchema).
+     * false → legacy shape: path params + a single `query`/`body` object arg.
+     */
+    flat: boolean;
   };
 }
 
@@ -52,6 +58,42 @@ export function buildToolDefinition(
   if (isWrite && !opts.enableWrites) return null;
   if (!hasScopeFor(tool.scope, opts.availableScopes)) return null;
 
+  const writeBanner = isWrite ? "[WRITE] " : "";
+  const description =
+    `${writeBanner}${tool.description} ` +
+    `(${tool.method} ${tool.path}, scope: ${tool.scope})`;
+
+  // ── Preferred: schema-driven (the CRM manifest published an inputSchema) ──
+  // Register the tool with the manifest's flat argument schema directly, so
+  // every parameter is named, typed, and documented to the model.
+  const schema = tool.inputSchema;
+  if (
+    schema &&
+    isPlainObject(schema.properties) &&
+    Object.keys(schema.properties as Record<string, unknown>).length > 0
+  ) {
+    const req = Array.isArray(schema.required) ? schema.required : [];
+    return {
+      name: `${TOOL_PREFIX}${tool.name}`,
+      description,
+      inputSchema: {
+        type: "object",
+        properties: schema.properties as Record<string, unknown>,
+        required: req.length > 0 ? req : undefined,
+        additionalProperties: schema.additionalProperties === true,
+      },
+      meta: {
+        method: tool.method,
+        pathTemplate: tool.path,
+        scope: tool.scope,
+        isWrite,
+        flat: true,
+      },
+    };
+  }
+
+  // ── Fallback (legacy): path params + a generic query/body blob ──
+  // Used only for tools the manifest hasn't given a schema yet.
   const pathParams = extractPathParams(tool.path);
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
@@ -82,11 +124,6 @@ export function buildToolDefinition(
     };
   }
 
-  const writeBanner = isWrite ? "[WRITE] " : "";
-  const description =
-    `${writeBanner}${tool.description} ` +
-    `(${tool.method} ${tool.path}, scope: ${tool.scope})`;
-
   return {
     name: `${TOOL_PREFIX}${tool.name}`,
     description,
@@ -101,6 +138,7 @@ export function buildToolDefinition(
       pathTemplate: tool.path,
       scope: tool.scope,
       isWrite,
+      flat: false,
     },
   };
 }
@@ -132,14 +170,33 @@ export async function executeTool(
   }
   const path = substitutePath(def.meta.pathTemplate, paramValues);
 
-  const query =
-    def.meta.method === "GET" && isPlainObject(rawInput.query)
-      ? (rawInput.query as Record<string, string | number | boolean | undefined | null>)
-      : undefined;
-  const body =
-    def.meta.method !== "GET" && isPlainObject(rawInput.body)
-      ? rawInput.body
-      : undefined;
+  let query: Record<string, string | number | boolean | undefined | null> | undefined;
+  let body: unknown;
+
+  if (def.meta.flat) {
+    // Flat args: everything except path params routes to the query string
+    // (GET) or the JSON body (writes).
+    const rest: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(rawInput)) {
+      if (pathParams.includes(key) || value === undefined) continue;
+      rest[key] = value;
+    }
+    if (def.meta.method === "GET") {
+      query = rest as Record<string, string | number | boolean | undefined | null>;
+    } else {
+      body = rest;
+    }
+  } else {
+    // Legacy shape: a single `query` / `body` object argument.
+    query =
+      def.meta.method === "GET" && isPlainObject(rawInput.query)
+        ? (rawInput.query as Record<string, string | number | boolean | undefined | null>)
+        : undefined;
+    body =
+      def.meta.method !== "GET" && isPlainObject(rawInput.body)
+        ? rawInput.body
+        : undefined;
+  }
 
   const response = await client.request({
     method: def.meta.method,

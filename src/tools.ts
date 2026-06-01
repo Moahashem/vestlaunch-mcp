@@ -6,8 +6,10 @@
  * GET tools also accept an optional `query` object; non-GET tools
  * accept an optional `body` object.
  *
- * Tools are registered under the `vestlaunch_` prefix to avoid name
- * collisions with other MCP servers loaded into the same agent.
+ * Tool names are used as-is. The MCP host already namespaces every tool
+ * by server (e.g. `mcp__vestlaunch__create_segment`), so an extra
+ * `vestlaunch_` prefix would be redundant double-namespacing. Keeping the
+ * bare CRM capability name keeps tool names stable and clean.
  */
 
 import type { ApiClient, HttpMethod } from "./api-client.js";
@@ -37,7 +39,7 @@ export interface McpToolDefinition {
   };
 }
 
-const TOOL_PREFIX = "vestlaunch_";
+const TOOL_PREFIX = "";
 const WRITE_METHODS: ReadonlyArray<HttpMethod> = ["POST", "PATCH", "PUT", "DELETE"];
 
 export interface BuildOptions {

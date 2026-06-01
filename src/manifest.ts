@@ -18,6 +18,19 @@ export interface ManifestTool {
   path: string;
   scope: string;
   description: string;
+  /**
+   * Optional JSON Schema describing the tool's flat input arguments
+   * (path params, query/body fields). Published by the CRM manifest so
+   * the connector can register fully-typed tools instead of a generic
+   * body/query blob. When absent, the connector falls back to the
+   * generic path/query/body shape.
+   */
+  inputSchema?: {
+    type?: string;
+    properties?: Record<string, unknown>;
+    required?: string[];
+    additionalProperties?: boolean;
+  };
 }
 
 export interface AgentIdentity {

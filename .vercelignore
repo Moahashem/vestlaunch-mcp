@@ -1,0 +1,7 @@
+# Keep Vercel from seeing the stdio MCP entry points so it does NOT
+# auto-detect a Node "root entrypoint" (src/index.ts / dist/index.js) and
+# instead deploys the self-contained /api serverless functions.
+# The stdio MCP (src/*, dist/*) is unaffected for local/npm clients.
+src
+dist
+tsconfig.json

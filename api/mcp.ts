@@ -248,9 +248,8 @@ async function executeTool(cfg: Cfg, def: ToolDef, raw: Record<string, unknown>)
 // ───────────────────────── SMART TOOL: count_landlord_leads ─────────────────────────
 // Thin-agent / smart-tools (D13). Server-side pagination + windowed bucketing so the
 // agent makes ONE call → 4 numbers. Implements the LOCKED valid-lead definition
-// (D4 / pilot1-daily-lead-count-spec.md). Logic validated locally (leadcount.test.mjs)
-// and reproduces the 2026-06-01 baseline 2 / 2 / 44 / 90 (This Week / This Month /
-// Last Month / Quarter). READ-ONLY.
+// (D4 / pilot1-daily-lead-count-spec.md). Logic validated locally (leadcount.test.mjs).
+// READ-ONLY. NOTE: the "This Week" window runs Sunday–Saturday (Mo, 2026-06-02).
 const COUNT_TOOL_NAME = "count_landlord_leads";
 const COUNT_TOOL_DESC =
   "Smart server-side aggregation: paginates ALL VestLaunch opportunities and returns the " +
@@ -258,11 +257,11 @@ const COUNT_TOOL_DESC =
   "definition: pipeline.name == 'Landlord Leads', createdAt in window, EXCLUDING stage " +
   "DOESNT_QUALIFY and test contacts whose primaryContact.email ends in @flatfeelandlord.com / " +
   "@hashemre.com / @example.com / @example.org (gmail plus-addressing is kept). Windows: This " +
-  "Week = Mon-Sun current week; This Month = month-to-date; Last Month = previous full calendar " +
-  "month; Quarter = current calendar quarter-to-date. Returns { this_week, this_month, " +
-  "last_month, quarter, total_pulled, doesnt_qualify, as_of, window_bounds }. Optional 'as_of' " +
-  "(YYYY-MM-DD, America/Chicago) computes windows as of the end of that day; defaults to now. " +
-  "Read-only; makes no writes.";
+  "Week = Sunday-Saturday of the current week; This Month = month-to-date; Last Month = previous " +
+  "full calendar month; Quarter = current calendar quarter-to-date. Returns { this_week, " +
+  "this_month, last_month, quarter, total_pulled, doesnt_qualify, as_of, window_bounds }. " +
+  "Optional 'as_of' (YYYY-MM-DD, America/Chicago) computes windows as of the end of that day; " +
+  "defaults to now. Read-only; makes no writes.";
 const COUNT_TOOL_SCHEMA = {
   type: "object" as const,
   properties: {
@@ -270,8 +269,7 @@ const COUNT_TOOL_SCHEMA = {
       type: "string",
       description:
         "Optional reference date YYYY-MM-DD (America/Chicago). Windows are computed as of the " +
-        "end of that day. Defaults to the current time. Use 2026-06-01 to reproduce the " +
-        "validated baseline (2 / 2 / 44 / 90).",
+        "end of that day. Defaults to the current time.",
     },
   },
   additionalProperties: false,
@@ -281,7 +279,8 @@ const LANDLORD_PIPELINE_NAME = "Landlord Leads";
 const DISQUALIFIED_STAGE = "DOESNT_QUALIFY";
 const TEST_EMAIL_SUFFIXES = ["@flatfeelandlord.com", "@hashemre.com", "@example.com", "@example.org"];
 const CT_TZ = "America/Chicago";
-const WD: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+// Week runs Sunday–Saturday (Mo, 2026-06-02). Sun=0 .. Sat=6.
+const WD: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 interface CtParts {
   year: number;
@@ -302,7 +301,7 @@ function ctParts(d: Date): CtParts {
     year: Number(get("year")),
     month: Number(get("month")),
     day: Number(get("day")),
-    weekday: WD[get("weekday")] ?? 1,
+    weekday: WD[get("weekday")] ?? 0,
   };
 }
 const pad2 = (n: number): string => String(n).padStart(2, "0");
@@ -321,7 +320,7 @@ async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Prom
   const ref = ctParts(refDate);
   const refNum = dateNum(ref);
   const refNoonUtc = new Date(`${ref.year}-${pad2(ref.month)}-${pad2(ref.day)}T12:00:00Z`);
-  const weekStartDate = new Date(refNoonUtc.getTime() - (ref.weekday - 1) * 86_400_000);
+  const weekStartDate = new Date(refNoonUtc.getTime() - ref.weekday * 86_400_000); // Sun=0 -> Sunday start
   const weekStart = ctParts(weekStartDate);
   const weekStartNum = dateNum(weekStart);
   const lmYear = ref.month === 1 ? ref.year - 1 : ref.year;
@@ -393,6 +392,7 @@ async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Prom
     as_of: `${ref.year}-${pad2(ref.month)}-${pad2(ref.day)}`,
     window_bounds: {
       timezone: CT_TZ,
+      week: "Sunday–Saturday",
       this_week_start: `${weekStart.year}-${pad2(weekStart.month)}-${pad2(weekStart.day)}`,
       this_month: `${ref.year}-${pad2(ref.month)}`,
       last_month: `${lmYear}-${pad2(lmMonth)}`,

@@ -9,6 +9,9 @@
  * to start the daily task. The agent then runs entirely on Anthropic's
  * cloud (no laptop required) and writes the four lead counts to the sheet.
  *
+ * The session is created WITHOUT pinning a version, so it always runs the
+ * agent's current active version (v5 = thin agent + count_landlord_leads).
+ *
  * Schedule: see vercel.json (`0 11 * * *` UTC = 6:00 AM America/Chicago in
  * CDT). NOTE Vercel crons are UTC-only — in CST (Nov–Mar) this lands at
  * 5:00 AM CT. See vercel.json for the DST-exact dual-cron alternative.
@@ -36,13 +39,14 @@ const ANTHROPIC_VERSION = "2023-06-01";
 
 const DEFAULT_PROMPT = [
   "Run your daily landlord-lead count for today (America/Chicago).",
-  "Pull VestLaunch fully (paginate every page), apply the LOCKED valid-lead",
-  "definition, and compute the four windows: This Week, This Month, Last",
-  "Month, Quarter. Ensure today's tab (M.D.2026) exists in the Company",
-  "Numbers sheet, then write the four counts to B26:E26 (Sales -> Leads).",
-  "Finally, read B26:E26 back and report exactly what you wrote.",
-  "If the VestLaunch pull fails or looks incomplete, DO NOT write or guess —",
-  "leave B26:E26 for manual entry and clearly report the failure.",
+  "Call your count_landlord_leads tool ONCE (no arguments) to get the four",
+  "window counts — do NOT paginate opportunities yourself. Ensure today's tab",
+  "(M.D.2026) exists in the Company Numbers sheet, then write the four counts",
+  "to B26:E26 (Sales -> Leads): B26=this_week, C26=this_month, D26=last_month,",
+  "E26=quarter. Finally, read B26:E26 back and report exactly what you wrote.",
+  "If count_landlord_leads fails or returns implausible data (e.g. total_pulled",
+  "is 0 or far below ~10,000), DO NOT write or guess — leave B26:E26 for manual",
+  "entry and clearly report the failure.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {

@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "echo 'no build step — Vercel bundles server.ts directly'",
   "crons": [
     { "path": "/api/cron/daily-lead-count", "schedule": "0 11 * * *" }
   ]

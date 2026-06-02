@@ -1,7 +1,7 @@
 {
   "name": "vestlaunch-mcp",
   "version": "0.1.0",
-  "description": "VestLaunch CRM MCP server — manifest-driven, multi-agent. Wraps the ffl-crm /api/v1/* surface so any MCP-compatible agent (Claude, Cowork, Code, ClawBot) can read and (with explicit opt-in) write CRM data.",
+  "description": "VestLaunch CRM MCP server — manifest-driven, multi-agent. Wraps the ffl-crm /api/v1/* surface so any MCP-compatible agent (Claude, Cowork, Code, ClawBot) can read and (with explicit opt-in) write CRM data. Runs over stdio (local) or HTTP/Streamable (hosted on Vercel for Claude Managed Agents).",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -43,7 +43,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

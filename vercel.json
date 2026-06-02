@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "functions": {
+    "api/mcp.ts": { "maxDuration": 60 },
+    "api/cron/daily-lead-count.ts": { "maxDuration": 60 }
+  },
+  "crons": [
+    { "path": "/api/cron/daily-lead-count", "schedule": "0 11 * * *" }
+  ]
+}

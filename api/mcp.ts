@@ -12,11 +12,16 @@
  * VESTLAUNCH_ENABLE_WRITES=true — left off here), and proxies tool calls to
  * the CRM /api/v1/* surface with the agent's Bearer key.
  *
- * SMART TOOL (D13 — thin agent, smart tools): also registers ONE synthetic
- * aggregation tool, `count_landlord_leads`, that returns just the four window
- * counts. It tries the native CRM endpoint /api/v1/analytics/lead-counts first
- * (cheap, computed server-side) and falls back to full pagination if that
- * endpoint isn't deployed yet. READ-ONLY.
+ * SMART TOOLS (D13 — thin agent, smart tools): also registers synthetic
+ * aggregation tools that return small computed answers instead of raw rows:
+ *   - `count_landlord_leads` — four landlord-lead window counts. Tries the
+ *     native CRM endpoint /api/v1/analytics/lead-counts first (cheap, computed
+ *     server-side) and falls back to full pagination if not deployed.
+ *   - `get_ffl_occupancy` — FFL portfolio occupancy (total_doors / occupied /
+ *     vacant / occupancy_pct), with the zDUMMY accounting shells + the 1201
+ *     Fannin office EXCLUDED. Reads the native endpoint
+ *     /api/v1/analytics/ffl-portfolio (no fallback — that endpoint is the only
+ *     source that can see property names to exclude dummies). READ-ONLY.
  *
  * Per-agent scoping: append `?tools=a,b,c` to the MCP URL to expose ONLY those
  * tools to a connecting agent (default = all). Lets a single-purpose agent see
@@ -445,6 +450,42 @@ async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Prom
   return countViaPagination(cfg, asOf);
 }
 
+// ───────────────────────── SMART TOOL: get_ffl_occupancy ─────────────────────────
+// Thin-agent / smart-tools (D13). Returns FFL portfolio occupancy computed server-side
+// from the AppFolio rent roll, with the zDUMMY accounting shells + the 1201 Fannin office
+// EXCLUDED. Reads the native CRM endpoint /api/v1/analytics/ffl-portfolio — there is NO
+// pagination fallback because only that endpoint can see property names to drop dummies.
+// READ-ONLY.
+const FFL_OCC_TOOL_NAME = "get_ffl_occupancy";
+const FFL_OCC_TOOL_DESC =
+  "Smart server-side aggregation: returns FFL portfolio occupancy with dummy accounts EXCLUDED. " +
+  "Drops any property whose name matches /zdummy/i (the 'zDUMMY <STATE>-Flat Fee Landlord, LLC.' " +
+  "accounting shells) and the 1201 Fannin office; every other unit is a real FFL door. Occupied = " +
+  "unit status not matching /vacant/i. Returns { total_doors, occupied, vacant, occupancy_pct, " +
+  "excluded_dummy_units, raw_total_units, excluded_properties, status_breakdown, as_of, source }. " +
+  "Source = AppFolio rent_roll via /api/v1/analytics/ffl-portfolio. No arguments. Read-only.";
+const FFL_OCC_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflOccupancy(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-portfolio");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-portfolio endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-portfolio (ffl-crm PR #527) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).total_doors !== "number") {
+    throw new Error("ffl-portfolio endpoint returned an unexpected shape (no numeric total_doors).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-portfolio" };
+}
+
 // ───────────────────────── server bootstrap ─────────────────────────
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
@@ -482,6 +523,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   for (const d of defs) byName.set(d.name, d);
 
   const includeCountTool = !toolFilter || toolFilter.has(COUNT_TOOL_NAME);
+  const includeFflOccTool = !toolFilter || toolFilter.has(FFL_OCC_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -490,6 +532,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       ...defs.map((d) => ({ name: d.name, description: d.description, inputSchema: d.inputSchema })),
       ...(includeCountTool
         ? [{ name: COUNT_TOOL_NAME, description: COUNT_TOOL_DESC, inputSchema: COUNT_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflOccTool
+        ? [{ name: FFL_OCC_TOOL_NAME, description: FFL_OCC_TOOL_DESC, inputSchema: FFL_OCC_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -508,6 +553,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${COUNT_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_OCC_TOOL_NAME) {
+      if (!includeFflOccTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflOccupancy(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_OCC_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

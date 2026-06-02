@@ -487,6 +487,43 @@ async function getFflOccupancy(cfg: Cfg): Promise<unknown> {
 }
 
 // ───────────────────────── server bootstrap ─────────────────────────
+// --- SMART TOOL: get_ffl_renewals ---
+// Thin-agent / smart-tools (D13). Returns FFL lease-renewal metrics (Company Numbers
+// row 9, B9-F9) computed server-side from AppFolio, dummy accounts EXCLUDED. Reads the
+// native CRM endpoint /api/v1/analytics/ffl-renewals - no fallback (only that endpoint
+// can see property names to drop dummies and stitch lease_expiration_detail + lease_history).
+// READ-ONLY.
+const FFL_REN_TOOL_NAME = "get_ffl_renewals";
+const FFL_REN_TOOL_DESC =
+  "Smart server-side aggregation: returns FFL lease-renewal metrics for Company Numbers " +
+  "row 9 (B9-F9), dummy accounts EXCLUDED (/zdummy/i + 1201 Fannin). Computed from AppFolio " +
+  "rent_roll + lease_expiration_detail + lease_history. Returns { this_month_expiring (B9), " +
+  "this_month_expiring_detail, pending_signature (C9), signed_renewals_this_month (D9), " +
+  "eligible_label (E9, e.g. 'Jun(2) - Jul(1) - Aug(8)'), eligible_buckets, renewal_pct_90d (F9), " +
+  "renewal_pct_components, window, excluded_properties, as_of, source }. today = America/Chicago, " +
+  "+90 strict. Source = /api/v1/analytics/ffl-renewals. No arguments. Read-only.";
+const FFL_REN_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflRenewals(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-renewals");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-renewals endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-renewals (ffl-crm PR #540) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).this_month_expiring !== "number") {
+    throw new Error("ffl-renewals endpoint returned an unexpected shape (no numeric this_month_expiring).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-renewals" };
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -524,6 +561,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
 
   const includeCountTool = !toolFilter || toolFilter.has(COUNT_TOOL_NAME);
   const includeFflOccTool = !toolFilter || toolFilter.has(FFL_OCC_TOOL_NAME);
+  const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -535,6 +573,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflOccTool
         ? [{ name: FFL_OCC_TOOL_NAME, description: FFL_OCC_TOOL_DESC, inputSchema: FFL_OCC_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflRenTool
+        ? [{ name: FFL_REN_TOOL_NAME, description: FFL_REN_TOOL_DESC, inputSchema: FFL_REN_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -570,6 +611,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_OCC_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_REN_TOOL_NAME) {
+      if (!includeFflRenTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflRenewals(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_REN_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

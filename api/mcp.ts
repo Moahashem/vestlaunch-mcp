@@ -12,17 +12,25 @@
  * VESTLAUNCH_ENABLE_WRITES=true — left off here), and proxies tool calls to
  * the CRM /api/v1/* surface with the agent's Bearer key.
  *
- * SMART TOOL (D13 — thin agent, smart tools): in addition to the manifest
- * tools, this server registers ONE synthetic aggregation tool,
- * `count_landlord_leads`, that paginates ALL opportunities and buckets them by
- * createdAt server-side, returning only the four window counts. This keeps the
- * agent thin (one call → 4 numbers) instead of pulling ~10.4k records into its
- * context. It is READ-ONLY (GET only) and applies the LOCKED valid-lead
- * definition (see countLandlordLeads).
+ * SMART TOOL (D13 — thin agent, smart tools): also registers ONE synthetic
+ * aggregation tool, `count_landlord_leads`, that returns just the four window
+ * counts. It tries the native CRM endpoint /api/v1/analytics/lead-counts first
+ * (cheap, computed server-side) and falls back to full pagination if that
+ * endpoint isn't deployed yet. READ-ONLY.
  *
- * Auth: a single static Bearer token (MCP_BEARER_TOKEN). The Claude Managed
- * Agents credential vault stores this token bound to this URL and injects it
- * on connect; requests without the matching Bearer are rejected.
+ * Per-agent scoping: append `?tools=a,b,c` to the MCP URL to expose ONLY those
+ * tools to a connecting agent (default = all). Lets a single-purpose agent see
+ * just the tool it needs. (NOTE: if the credential vault binds the Bearer to the
+ * exact base URL, confirm it still injects with a query string before relying on
+ * this for a scheduled agent.)
+ *
+ * Safe-write scaffold (D13): writes are OFF unless VESTLAUNCH_ENABLE_WRITES=true.
+ * Even when on, DELETE-method tools are NEVER exposed, and an optional
+ * VESTLAUNCH_WRITE_ALLOWLIST (comma-separated tool names) restricts writes to
+ * exactly those tools — least privilege for any future "acting" agent.
+ *
+ * Auth: a single static Bearer token (MCP_BEARER_TOKEN), injected by the
+ * Managed Agents credential vault on connect.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -44,6 +52,7 @@ interface Cfg {
   apiKey: string;
   enableWrites: boolean;
   timeoutMs: number;
+  writeAllowlist: Set<string> | null;
 }
 
 function loadCfg(): Cfg {
@@ -52,11 +61,16 @@ function loadCfg(): Cfg {
   if (!baseUrl) throw new Error("Missing env: VESTLAUNCH_BASE_URL");
   if (!apiKey) throw new Error("Missing env: VESTLAUNCH_API_KEY");
   const t = Number.parseInt(process.env.VESTLAUNCH_TIMEOUT_MS ?? "", 10);
+  const allowRaw = (process.env.VESTLAUNCH_WRITE_ALLOWLIST ?? "").trim();
+  const writeAllowlist = allowRaw
+    ? new Set(allowRaw.split(",").map((s) => s.trim()).filter(Boolean))
+    : null;
   return {
     baseUrl,
     apiKey,
     enableWrites: (process.env.VESTLAUNCH_ENABLE_WRITES ?? "").trim().toLowerCase() === "true",
     timeoutMs: Number.isFinite(t) && t > 0 ? t : 30_000,
+    writeAllowlist,
   };
 }
 
@@ -168,11 +182,17 @@ function hasScope(required: string, available: ReadonlyArray<string>): boolean {
 
 function buildToolDef(
   tool: ManifestTool,
-  enableWrites: boolean,
+  cfg: Cfg,
   scopes: ReadonlyArray<string>,
 ): ToolDef | null {
   const isWrite = WRITE_METHODS.includes(tool.method);
-  if (isWrite && !enableWrites) return null;
+  if (isWrite) {
+    if (!cfg.enableWrites) return null;
+    // Safe-write scaffold: never expose destructive DELETEs through this MCP.
+    if (tool.method === "DELETE") return null;
+    // If an allowlist is configured, only expose explicitly-named write tools.
+    if (cfg.writeAllowlist && !cfg.writeAllowlist.has(tool.name)) return null;
+  }
   if (!hasScope(tool.scope, scopes)) return null;
   const desc = `${isWrite ? "[WRITE] " : ""}${tool.description} (${tool.method} ${tool.path}, scope: ${tool.scope})`;
   const schema = tool.inputSchema;
@@ -246,30 +266,28 @@ async function executeTool(cfg: Cfg, def: ToolDef, raw: Record<string, unknown>)
 }
 
 // ───────────────────────── SMART TOOL: count_landlord_leads ─────────────────────────
-// Thin-agent / smart-tools (D13). Server-side pagination + windowed bucketing so the
-// agent makes ONE call → 4 numbers. Implements the LOCKED valid-lead definition
-// (D4 / pilot1-daily-lead-count-spec.md). Logic validated locally (leadcount.test.mjs).
-// READ-ONLY. NOTE: the "This Week" window runs Sunday–Saturday (Mo, 2026-06-02).
+// Thin-agent / smart-tools (D13). Returns just the four window counts. Tries the native
+// CRM endpoint /api/v1/analytics/lead-counts first (cheap, server-side); falls back to
+// full pagination + in-function bucketing if that endpoint isn't deployed (404) or errors.
+// READ-ONLY. Week window = Sunday–Saturday (Mo, 2026-06-02).
 const COUNT_TOOL_NAME = "count_landlord_leads";
 const COUNT_TOOL_DESC =
-  "Smart server-side aggregation: paginates ALL VestLaunch opportunities and returns the " +
-  "count of NEW VALID landlord leads for four windows in America/Chicago. LOCKED valid-lead " +
-  "definition: pipeline.name == 'Landlord Leads', createdAt in window, EXCLUDING stage " +
-  "DOESNT_QUALIFY and test contacts whose primaryContact.email ends in @flatfeelandlord.com / " +
-  "@hashemre.com / @example.com / @example.org (gmail plus-addressing is kept). Windows: This " +
-  "Week = Sunday-Saturday of the current week; This Month = month-to-date; Last Month = previous " +
-  "full calendar month; Quarter = current calendar quarter-to-date. Returns { this_week, " +
-  "this_month, last_month, quarter, total_pulled, doesnt_qualify, as_of, window_bounds }. " +
-  "Optional 'as_of' (YYYY-MM-DD, America/Chicago) computes windows as of the end of that day; " +
-  "defaults to now. Read-only; makes no writes.";
+  "Smart server-side aggregation: returns the count of NEW VALID landlord leads for four " +
+  "windows in America/Chicago. LOCKED valid-lead definition: pipeline.name == 'Landlord Leads', " +
+  "createdAt in window, EXCLUDING stage DOESNT_QUALIFY and test contacts whose " +
+  "primaryContact.email ends in @flatfeelandlord.com / @hashemre.com / @example.com / " +
+  "@example.org (gmail plus-addressing kept). Windows: This Week = Sunday-Saturday; This Month " +
+  "= month-to-date; Last Month = previous full calendar month; Quarter = current calendar " +
+  "quarter-to-date. Returns { this_week, this_month, last_month, quarter, total_pulled, " +
+  "doesnt_qualify, as_of, window_bounds, source }. Optional 'as_of' (YYYY-MM-DD). Read-only.";
 const COUNT_TOOL_SCHEMA = {
   type: "object" as const,
   properties: {
     as_of: {
       type: "string",
       description:
-        "Optional reference date YYYY-MM-DD (America/Chicago). Windows are computed as of the " +
-        "end of that day. Defaults to the current time.",
+        "Optional reference date YYYY-MM-DD (America/Chicago). Windows computed as of the end " +
+        "of that day. Defaults to the current time.",
     },
   },
   additionalProperties: false,
@@ -308,26 +326,45 @@ const pad2 = (n: number): string => String(n).padStart(2, "0");
 const dateNum = (p: { year: number; month: number; day: number }): number =>
   p.year * 10000 + p.month * 100 + p.day;
 
-async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
-  // ── reference instant (America/Chicago) ──
-  const asOf = typeof args.as_of === "string" ? args.as_of.trim() : "";
+async function countViaNativeEndpoint(cfg: Cfg, asOf: string): Promise<Record<string, unknown> | null> {
+  const query: Record<string, unknown> = {};
+  if (asOf) query.as_of = asOf;
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/lead-counts", query);
+  if (!resp.success) return null; // 404 (not deployed yet) or error → caller falls back
+  const d = resp.data;
+  if (!d || typeof d !== "object") return null;
+  const o = d as Record<string, unknown>;
+  if (typeof o.this_week !== "number") return null; // unexpected shape → fall back
+  return {
+    this_week: o.this_week,
+    this_month: o.this_month,
+    last_month: o.last_month,
+    quarter: o.quarter,
+    total_pulled: o.total_opportunities ?? o.total_pulled ?? null,
+    doesnt_qualify: o.doesnt_qualify ?? null,
+    as_of: o.as_of,
+    window_bounds: o.window_bounds,
+    source: "native:/api/v1/analytics/lead-counts",
+  };
+}
+
+async function countViaPagination(cfg: Cfg, asOf: string): Promise<Record<string, unknown>> {
   let refDate: Date;
   if (/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
-    refDate = new Date(`${asOf}T12:00:00Z`); // noon UTC anchor keeps the CT calendar day stable
+    refDate = new Date(`${asOf}T12:00:00Z`);
   } else {
     refDate = new Date();
   }
   const ref = ctParts(refDate);
   const refNum = dateNum(ref);
   const refNoonUtc = new Date(`${ref.year}-${pad2(ref.month)}-${pad2(ref.day)}T12:00:00Z`);
-  const weekStartDate = new Date(refNoonUtc.getTime() - ref.weekday * 86_400_000); // Sun=0 -> Sunday start
+  const weekStartDate = new Date(refNoonUtc.getTime() - ref.weekday * 86_400_000);
   const weekStart = ctParts(weekStartDate);
   const weekStartNum = dateNum(weekStart);
   const lmYear = ref.month === 1 ? ref.year - 1 : ref.year;
   const lmMonth = ref.month === 1 ? 12 : ref.month - 1;
   const quarterStartMonth = Math.floor((ref.month - 1) / 3) * 3 + 1;
 
-  // ── paginate ALL opportunities (parallel batches, end-detected) ──
   const limit = 100;
   const batch = 8;
   const all: any[] = [];
@@ -348,13 +385,12 @@ async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Prom
       }
       const rows = Array.isArray(resp.data) ? resp.data : [];
       all.push(...rows);
-      if (rows.length < limit) done = true; // a short/empty page marks the end of the dataset
+      if (rows.length < limit) done = true;
     }
     base += batch * limit;
     guard++;
   }
 
-  // ── bucket per the LOCKED definition ──
   let this_week = 0;
   let this_month = 0;
   let last_month = 0;
@@ -375,7 +411,7 @@ async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Prom
     if (Number.isNaN(cd.getTime())) continue;
     const c = ctParts(cd);
     const cNum = dateNum(c);
-    if (cNum > refNum) continue; // future relative to the reference day
+    if (cNum > refNum) continue;
     if (cNum >= weekStartNum) this_week++;
     if (c.year === ref.year && c.month === ref.month) this_month++;
     if (c.year === lmYear && c.month === lmMonth) last_month++;
@@ -398,13 +434,21 @@ async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Prom
       last_month: `${lmYear}-${pad2(lmMonth)}`,
       quarter_start_month: `${ref.year}-${pad2(quarterStartMonth)}`,
     },
+    source: "fallback:pagination",
   };
+}
+
+async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
+  const asOf = typeof args.as_of === "string" ? args.as_of.trim() : "";
+  const native = await countViaNativeEndpoint(cfg, asOf);
+  if (native) return native;
+  return countViaPagination(cfg, asOf);
 }
 
 // ───────────────────────── server bootstrap ─────────────────────────
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
-async function buildServer(cfg: Cfg): Promise<Server> {
+async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
   const me = await crmRequest<{ identity?: { scopes?: string[] }; capabilities?: ManifestTool[] }>(
     cfg,
     "GET",
@@ -430,26 +474,33 @@ async function buildServer(cfg: Cfg): Promise<Server> {
 
   const defs: ToolDef[] = [];
   for (const t of tools) {
-    const d = buildToolDef(t, cfg.enableWrites, scopes);
+    if (toolFilter && !toolFilter.has(t.name)) continue;
+    const d = buildToolDef(t, cfg, scopes);
     if (d) defs.push(d);
   }
   const byName = new Map<string, ToolDef>();
   for (const d of defs) byName.set(d.name, d);
+
+  const includeCountTool = !toolFilter || toolFilter.has(COUNT_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       ...defs.map((d) => ({ name: d.name, description: d.description, inputSchema: d.inputSchema })),
-      { name: COUNT_TOOL_NAME, description: COUNT_TOOL_DESC, inputSchema: COUNT_TOOL_SCHEMA },
+      ...(includeCountTool
+        ? [{ name: COUNT_TOOL_NAME, description: COUNT_TOOL_DESC, inputSchema: COUNT_TOOL_SCHEMA }]
+        : []),
     ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: rawArgs } = req.params;
 
-    // Smart synthetic tool (not from the CRM manifest).
     if (name === COUNT_TOOL_NAME) {
+      if (!includeCountTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
       try {
         const result = await countLandlordLeads(cfg, (rawArgs ?? {}) as Record<string, unknown>);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -488,6 +539,19 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+function parseToolFilter(reqUrl: string | undefined): Set<string> | null {
+  if (!reqUrl) return null;
+  try {
+    const u = new URL(reqUrl, "http://localhost");
+    const raw = u.searchParams.get("tools");
+    if (!raw) return null;
+    const names = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    return names.length > 0 ? new Set(names) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default async function handler(
   req: IncomingMessage & { body?: unknown },
   res: ServerResponse,
@@ -498,9 +562,11 @@ export default async function handler(
     return;
   }
 
+  const toolFilter = parseToolFilter(req.url);
+
   let server: Server;
   try {
-    server = await buildServer(loadCfg());
+    server = await buildServer(loadCfg(), toolFilter);
   } catch (err) {
     sendJson(res, 500, {
       jsonrpc: "2.0",

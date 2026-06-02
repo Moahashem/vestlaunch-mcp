@@ -12,6 +12,14 @@
  * VESTLAUNCH_ENABLE_WRITES=true — left off here), and proxies tool calls to
  * the CRM /api/v1/* surface with the agent's Bearer key.
  *
+ * SMART TOOL (D13 — thin agent, smart tools): in addition to the manifest
+ * tools, this server registers ONE synthetic aggregation tool,
+ * `count_landlord_leads`, that paginates ALL opportunities and buckets them by
+ * createdAt server-side, returning only the four window counts. This keeps the
+ * agent thin (one call → 4 numbers) instead of pulling ~10.4k records into its
+ * context. It is READ-ONLY (GET only) and applies the LOCKED valid-lead
+ * definition (see countLandlordLeads).
+ *
  * Auth: a single static Bearer token (MCP_BEARER_TOKEN). The Claude Managed
  * Agents credential vault stores this token bound to this URL and injects it
  * on connect; requests without the matching Bearer are rejected.
@@ -237,6 +245,162 @@ async function executeTool(cfg: Cfg, def: ToolDef, raw: Record<string, unknown>)
   return crmRequest(cfg, def.meta.method, path, query, body);
 }
 
+// ───────────────────────── SMART TOOL: count_landlord_leads ─────────────────────────
+// Thin-agent / smart-tools (D13). Server-side pagination + windowed bucketing so the
+// agent makes ONE call → 4 numbers. Implements the LOCKED valid-lead definition
+// (D4 / pilot1-daily-lead-count-spec.md). Logic validated locally (leadcount.test.mjs)
+// and reproduces the 2026-06-01 baseline 2 / 2 / 44 / 90 (This Week / This Month /
+// Last Month / Quarter). READ-ONLY.
+const COUNT_TOOL_NAME = "count_landlord_leads";
+const COUNT_TOOL_DESC =
+  "Smart server-side aggregation: paginates ALL VestLaunch opportunities and returns the " +
+  "count of NEW VALID landlord leads for four windows in America/Chicago. LOCKED valid-lead " +
+  "definition: pipeline.name == 'Landlord Leads', createdAt in window, EXCLUDING stage " +
+  "DOESNT_QUALIFY and test contacts whose primaryContact.email ends in @flatfeelandlord.com / " +
+  "@hashemre.com / @example.com / @example.org (gmail plus-addressing is kept). Windows: This " +
+  "Week = Mon-Sun current week; This Month = month-to-date; Last Month = previous full calendar " +
+  "month; Quarter = current calendar quarter-to-date. Returns { this_week, this_month, " +
+  "last_month, quarter, total_pulled, doesnt_qualify, as_of, window_bounds }. Optional 'as_of' " +
+  "(YYYY-MM-DD, America/Chicago) computes windows as of the end of that day; defaults to now. " +
+  "Read-only; makes no writes.";
+const COUNT_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    as_of: {
+      type: "string",
+      description:
+        "Optional reference date YYYY-MM-DD (America/Chicago). Windows are computed as of the " +
+        "end of that day. Defaults to the current time. Use 2026-06-01 to reproduce the " +
+        "validated baseline (2 / 2 / 44 / 90).",
+    },
+  },
+  additionalProperties: false,
+};
+
+const LANDLORD_PIPELINE_NAME = "Landlord Leads";
+const DISQUALIFIED_STAGE = "DOESNT_QUALIFY";
+const TEST_EMAIL_SUFFIXES = ["@flatfeelandlord.com", "@hashemre.com", "@example.com", "@example.org"];
+const CT_TZ = "America/Chicago";
+const WD: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+
+interface CtParts {
+  year: number;
+  month: number;
+  day: number;
+  weekday: number;
+}
+function ctParts(d: Date): CtParts {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: CT_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+  }).formatToParts(d);
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? "";
+  return {
+    year: Number(get("year")),
+    month: Number(get("month")),
+    day: Number(get("day")),
+    weekday: WD[get("weekday")] ?? 1,
+  };
+}
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+const dateNum = (p: { year: number; month: number; day: number }): number =>
+  p.year * 10000 + p.month * 100 + p.day;
+
+async function countLandlordLeads(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
+  // ── reference instant (America/Chicago) ──
+  const asOf = typeof args.as_of === "string" ? args.as_of.trim() : "";
+  let refDate: Date;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+    refDate = new Date(`${asOf}T12:00:00Z`); // noon UTC anchor keeps the CT calendar day stable
+  } else {
+    refDate = new Date();
+  }
+  const ref = ctParts(refDate);
+  const refNum = dateNum(ref);
+  const refNoonUtc = new Date(`${ref.year}-${pad2(ref.month)}-${pad2(ref.day)}T12:00:00Z`);
+  const weekStartDate = new Date(refNoonUtc.getTime() - (ref.weekday - 1) * 86_400_000);
+  const weekStart = ctParts(weekStartDate);
+  const weekStartNum = dateNum(weekStart);
+  const lmYear = ref.month === 1 ? ref.year - 1 : ref.year;
+  const lmMonth = ref.month === 1 ? 12 : ref.month - 1;
+  const quarterStartMonth = Math.floor((ref.month - 1) / 3) * 3 + 1;
+
+  // ── paginate ALL opportunities (parallel batches, end-detected) ──
+  const limit = 100;
+  const batch = 8;
+  const all: any[] = [];
+  let base = 0;
+  let done = false;
+  let guard = 0;
+  while (!done && guard < 2000) {
+    const offsets = Array.from({ length: batch }, (_, i) => base + i * limit);
+    const results = await Promise.all(
+      offsets.map((off) => crmRequest<any[]>(cfg, "GET", "/api/v1/opportunities", { limit, offset: off })),
+    );
+    for (let i = 0; i < results.length; i++) {
+      const resp = results[i]!;
+      if (!resp.success) {
+        throw new Error(
+          `opportunities fetch failed at offset ${offsets[i]} (HTTP ${resp.statusCode}): ${resp.error}`,
+        );
+      }
+      const rows = Array.isArray(resp.data) ? resp.data : [];
+      all.push(...rows);
+      if (rows.length < limit) done = true; // a short/empty page marks the end of the dataset
+    }
+    base += batch * limit;
+    guard++;
+  }
+
+  // ── bucket per the LOCKED definition ──
+  let this_week = 0;
+  let this_month = 0;
+  let last_month = 0;
+  let quarter = 0;
+  let doesnt_qualify = 0;
+
+  for (const o of all) {
+    if (o?.pipeline?.name !== LANDLORD_PIPELINE_NAME) continue;
+    if (o?.stage === DISQUALIFIED_STAGE) {
+      doesnt_qualify++;
+      continue;
+    }
+    const email = String(o?.primaryContact?.email ?? "").trim().toLowerCase();
+    if (TEST_EMAIL_SUFFIXES.some((s) => email.endsWith(s))) continue;
+    const createdRaw = o?.createdAt;
+    if (typeof createdRaw !== "string") continue;
+    const cd = new Date(createdRaw);
+    if (Number.isNaN(cd.getTime())) continue;
+    const c = ctParts(cd);
+    const cNum = dateNum(c);
+    if (cNum > refNum) continue; // future relative to the reference day
+    if (cNum >= weekStartNum) this_week++;
+    if (c.year === ref.year && c.month === ref.month) this_month++;
+    if (c.year === lmYear && c.month === lmMonth) last_month++;
+    if (c.year === ref.year && c.month >= quarterStartMonth && c.month <= ref.month) quarter++;
+  }
+
+  return {
+    this_week,
+    this_month,
+    last_month,
+    quarter,
+    total_pulled: all.length,
+    doesnt_qualify,
+    as_of: `${ref.year}-${pad2(ref.month)}-${pad2(ref.day)}`,
+    window_bounds: {
+      timezone: CT_TZ,
+      this_week_start: `${weekStart.year}-${pad2(weekStart.month)}-${pad2(weekStart.day)}`,
+      this_month: `${ref.year}-${pad2(ref.month)}`,
+      last_month: `${lmYear}-${pad2(lmMonth)}`,
+      quarter_start_month: `${ref.year}-${pad2(quarterStartMonth)}`,
+    },
+  };
+}
+
 // ───────────────────────── server bootstrap ─────────────────────────
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
@@ -275,11 +439,30 @@ async function buildServer(cfg: Cfg): Promise<Server> {
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: defs.map((d) => ({ name: d.name, description: d.description, inputSchema: d.inputSchema })),
+    tools: [
+      ...defs.map((d) => ({ name: d.name, description: d.description, inputSchema: d.inputSchema })),
+      { name: COUNT_TOOL_NAME, description: COUNT_TOOL_DESC, inputSchema: COUNT_TOOL_SCHEMA },
+    ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: rawArgs } = req.params;
+
+    // Smart synthetic tool (not from the CRM manifest).
+    if (name === COUNT_TOOL_NAME) {
+      try {
+        const result = await countLandlordLeads(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${COUNT_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     const def = byName.get(name);
     if (!def) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };

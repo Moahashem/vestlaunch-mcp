@@ -604,6 +604,46 @@ async function getFflHomes(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-homes" };
 }
 
+// --- SMART TOOL: get_ffl_leasing ---
+// Thin-agent / smart-tools (D13). Returns FFL "Apps & Leases" metrics (Company Numbers
+// row 23, A23-E23) computed server-side. Leases-signed (C23/D23/E23) come from AppFolio
+// lease_history (NEW leases = Renewal="No", by countersigned date). Apps (A23/B23) come
+// from BoomPay once wired into the endpoint (null + apps_available:false until then; the
+// agent must not write A23/B23 while apps_available is false). Reads the native CRM
+// endpoint /api/v1/analytics/ffl-leasing - no fallback. READ-ONLY.
+const FFL_LEASING_TOOL_NAME = "get_ffl_leasing";
+const FFL_LEASING_TOOL_DESC =
+  "Smart server-side aggregation: returns FFL 'Apps & Leases' metrics for Company Numbers " +
+  "row 23 (A23-E23), dummy accounts EXCLUDED (/zdummy/i + 1201 Fannin). Returns " +
+  "{ apps_this_month (A23), apps_last_month (B23), apps_available, apps_diagnostics, " +
+  "leases_signed_week (C23), leases_signed_month (D23), leases_signed_last_month (E23), " +
+  "per-window detail lists, leases_components, excluded_properties, window, cells, as_of, source }. " +
+  "Leases = AppFolio lease_history NEW leases (Renewal='No') keyed on countersigned_date; week is " +
+  "Sun-Sat. IMPORTANT: apps_this_month/apps_last_month are the BoomPay 'true source' and are NULL " +
+  "until BoomPay is wired - if apps_available is false, do NOT write A23/B23 (write only C23/D23/E23). " +
+  "Source = /api/v1/analytics/ffl-leasing. No arguments. Read-only.";
+const FFL_LEASING_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflLeasing(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-leasing");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-leasing endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-leasing (ffl-crm PR #561) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).leases_signed_month !== "number") {
+    throw new Error("ffl-leasing endpoint returned an unexpected shape (no numeric leases_signed_month).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-leasing" };
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -644,6 +684,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
+  const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -664,6 +705,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflHomesTool
         ? [{ name: FFL_HOMES_TOOL_NAME, description: FFL_HOMES_TOOL_DESC, inputSchema: FFL_HOMES_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflLeasingTool
+        ? [{ name: FFL_LEASING_TOOL_NAME, description: FFL_LEASING_TOOL_DESC, inputSchema: FFL_LEASING_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -750,6 +794,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_HOMES_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_LEASING_TOOL_NAME) {
+      if (!includeFflLeasingTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflLeasing(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_LEASING_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

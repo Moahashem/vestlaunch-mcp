@@ -524,6 +524,45 @@ async function getFflRenewals(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-renewals" };
 }
 
+// --- SMART TOOL: get_ffl_delinquency ---
+// Thin-agent / smart-tools (D13). Returns FFL delinquency metrics (Company Numbers
+// row 14, B14-F14) computed server-side from AppFolio, dummy accounts EXCLUDED. Reads
+// the native CRM endpoint /api/v1/analytics/ffl-delinquency - no fallback (only that
+// endpoint can see property names to drop dummies and sum charge_detail/delinquency).
+// READ-ONLY.
+const FFL_DEL_TOOL_NAME = "get_ffl_delinquency";
+const FFL_DEL_TOOL_DESC =
+  "Smart server-side aggregation: returns FFL delinquency metrics for Company Numbers " +
+  "row 14 (B14-F14), dummy accounts EXCLUDED (/zdummy/i + 1201 Fannin). Computed from AppFolio " +
+  "delinquency + charge_detail + rent_roll. Returns { delinquency_pct (B14, LIVE 'today'), " +
+  "start_of_week_pct (C14), balances_over_500 (D14), evictions_filed (E14), last_month_pct (F14, " +
+  "null until a month-end is observed => skip the cell), delinquency_components, " +
+  "charge_detail_diagnostics, evictions_detail, delinquency_history, window, excluded_properties, " +
+  "as_of, source }. B14 = sum(delinquency.amount_receivable) / sum(charge_detail Occupancy charges " +
+  "this month); it is date-sensitive (high right after the 1st, falls as auto-pay clears). today = " +
+  "America/Chicago. Source = /api/v1/analytics/ffl-delinquency. No arguments. Read-only.";
+const FFL_DEL_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflDelinquency(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-delinquency");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-delinquency endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-delinquency (ffl-crm PR #542) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).delinquency_pct !== "number") {
+    throw new Error("ffl-delinquency endpoint returned an unexpected shape (no numeric delinquency_pct).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-delinquency" };
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -562,6 +601,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeCountTool = !toolFilter || toolFilter.has(COUNT_TOOL_NAME);
   const includeFflOccTool = !toolFilter || toolFilter.has(FFL_OCC_TOOL_NAME);
   const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
+  const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -576,6 +616,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflRenTool
         ? [{ name: FFL_REN_TOOL_NAME, description: FFL_REN_TOOL_DESC, inputSchema: FFL_REN_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflDelTool
+        ? [{ name: FFL_DEL_TOOL_NAME, description: FFL_DEL_TOOL_DESC, inputSchema: FFL_DEL_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -628,6 +671,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_REN_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_DEL_TOOL_NAME) {
+      if (!includeFflDelTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflDelinquency(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_DEL_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

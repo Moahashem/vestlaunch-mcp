@@ -538,7 +538,7 @@ const FFL_DEL_TOOL_DESC =
   "start_of_week_pct (C14), balances_over_500 (D14), evictions_filed (E14), last_month_pct (F14, " +
   "null until a month-end is observed => skip the cell), delinquency_components, " +
   "charge_detail_diagnostics, evictions_detail, delinquency_history, window, excluded_properties, " +
-  "as_of, source }. B14 = sum(delinquency.amount_receivable) / sum(charge_detail Occupancy charges " +
+  "as_of, source }. B14 = gross aging-bucket balance / sum(charge_detail Occupancy charges " +
   "this month); it is date-sensitive (high right after the 1st, falls as auto-pay clears). today = " +
   "America/Chicago. Source = /api/v1/analytics/ffl-delinquency. No arguments. Read-only.";
 const FFL_DEL_TOOL_SCHEMA = {
@@ -561,6 +561,47 @@ async function getFflDelinquency(cfg: Cfg): Promise<unknown> {
     throw new Error("ffl-delinquency endpoint returned an unexpected shape (no numeric delinquency_pct).");
   }
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-delinquency" };
+}
+
+// --- SMART TOOL: get_ffl_homes ---
+// Thin-agent / smart-tools (D13). Returns FFL "Homes" metrics (Company Numbers row 20,
+// A20/B20/D20/E20) computed server-side from ShowMojo + AppFolio. Reads the native CRM
+// endpoint /api/v1/analytics/ffl-homes - no fallback (only that endpoint can join
+// ShowMojo listings with the AppFolio rent roll and exclude Z-named/dummy properties).
+// READ-ONLY.
+const FFL_HOMES_TOOL_NAME = "get_ffl_homes";
+const FFL_HOMES_TOOL_DESC =
+  "Smart server-side aggregation: returns FFL 'Homes' metrics for Company Numbers row 20 " +
+  "(A20/B20/D20/E20). Combines ShowMojo listings with the AppFolio rent roll. Returns " +
+  "{ homes_listed (A20 = count of ShowMojo RENT + STATUS_ACTIVE listings), listed_rent_total " +
+  "(B20 = sum of their rent), homes_to_list (D20 = AppFolio Vacant-Unrented/Notice-Unrented, " +
+  "not pre-leased, name not starting with Z, 1201 Fannin excluded, and NOT already on ShowMojo), " +
+  "fmr_potential (E20 = sum of advertised->market->current rent over D20), homes_components, " +
+  "showmojo_diagnostics, rent_roll_status_breakdown, rent_roll_sample_keys, to_list_sample, " +
+  "window, cells, as_of, source }. C20 is a blank separator (never written). IMPORTANT: if " +
+  "showmojo_diagnostics.ok is false or auth_style is null, the ShowMojo token/header failed - " +
+  "A20/B20 read 0 and D20 is over-counted; do NOT write the sheet in that case. " +
+  "Source = /api/v1/analytics/ffl-homes. No arguments. Read-only.";
+const FFL_HOMES_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflHomes(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-homes");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-homes endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-homes (ffl-crm PR #552) to be deployed, " +
+        "SHOWMOJO_API_TOKEN set in ffl-crm env, and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).homes_listed !== "number") {
+    throw new Error("ffl-homes endpoint returned an unexpected shape (no numeric homes_listed).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-homes" };
 }
 
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
@@ -602,6 +643,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflOccTool = !toolFilter || toolFilter.has(FFL_OCC_TOOL_NAME);
   const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
+  const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -619,6 +661,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflDelTool
         ? [{ name: FFL_DEL_TOOL_NAME, description: FFL_DEL_TOOL_DESC, inputSchema: FFL_DEL_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflHomesTool
+        ? [{ name: FFL_HOMES_TOOL_NAME, description: FFL_HOMES_TOOL_DESC, inputSchema: FFL_HOMES_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -688,6 +733,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_DEL_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_HOMES_TOOL_NAME) {
+      if (!includeFflHomesTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflHomes(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_HOMES_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

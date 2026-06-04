@@ -9,6 +9,12 @@
     { "path": "/api/cron/daily-occupancy", "schedule": "10 12 * * *" },
     { "path": "/api/cron/daily-occupancy", "schedule": "30 12 * * *" },
     { "path": "/api/cron/daily-occupancy", "schedule": "50 12 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "0 13 * * *" }
+    { "path": "/api/cron/daily-occupancy", "schedule": "0 13 * * *" },
+    { "path": "/api/cron/daily-showmojo", "schedule": "20 11 * * *" },
+    { "path": "/api/cron/daily-showmojo", "schedule": "40 11 * * *" },
+    { "path": "/api/cron/daily-showmojo", "schedule": "0 12 * * *" },
+    { "path": "/api/cron/daily-showmojo", "schedule": "20 12 * * *" },
+    { "path": "/api/cron/daily-showmojo", "schedule": "40 12 * * *" },
+    { "path": "/api/cron/daily-showmojo", "schedule": "0 13 * * *" }
   ]
 }

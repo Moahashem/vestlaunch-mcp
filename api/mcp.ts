@@ -644,6 +644,55 @@ async function getFflLeasing(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-leasing" };
 }
 
+// --- SMART TOOL: get_ffl_sales_calls ---
+// Thin-agent / smart-tools (D13). Returns FFL "Sales - Calls (made contact or discovery
+// call)" metrics (Company Numbers row 27, B27-E27) computed server-side. MATCHES the
+// Smarketing scorecard's "Appointments Completed" definition (locked with Mo 2026-06-04).
+// Reads the native CRM endpoint /api/v1/analytics/ffl-sales-calls - no fallback. READ-ONLY.
+const FFL_SALES_TOOL_NAME = "get_ffl_sales_calls";
+const FFL_SALES_TOOL_DESC =
+  "Smart server-side aggregation: returns FFL 'Sales - Calls (made contact or discovery call)' " +
+  "metrics for Company Numbers row 27 (B27-E27). MATCHES the scorecard 'Appointments Completed' " +
+  "rule: each SALES-workspace opportunity counts ONCE, in the period of its earliest appointment " +
+  "evidence - (a) a logged phone call >5 min before signing, (b) a stage move into Discovery " +
+  "Completed / Proposal Sent / Decision Pending / Agreement Out, or (c) a human (non-self-serve) " +
+  "SIGNED_CLIENT signing. Opps with no evidence (only 'made contact'/Connected, or self-serve " +
+  "signups) are NOT counted. Returns { this_week (B27), this_month (C27), last_month (D27), " +
+  "quarter (E27), appts_considered, as_of, window_bounds, cells, definition }. Windows = " +
+  "America/Chicago, week Sun-Sat (lines up with row 26). Optional 'as_of' (YYYY-MM-DD). " +
+  "Source = /api/v1/analytics/ffl-sales-calls. Read-only.";
+const FFL_SALES_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    as_of: {
+      type: "string",
+      description:
+        "Optional reference date YYYY-MM-DD (America/Chicago). Windows computed as of the end " +
+        "of that day. Defaults to the current time.",
+    },
+  },
+  additionalProperties: false,
+};
+
+async function getFflSalesCalls(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
+  const asOf = typeof args.as_of === "string" ? args.as_of.trim() : "";
+  const query: Record<string, unknown> = {};
+  if (asOf) query.as_of = asOf;
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-sales-calls", query);
+  if (!resp.success) {
+    throw new Error(
+      `ffl-sales-calls endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-sales-calls (ffl-crm PR #579) to be deployed " +
+        "and the Bearer key to have scope opportunities:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).this_week !== "number") {
+    throw new Error("ffl-sales-calls endpoint returned an unexpected shape (no numeric this_week).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-sales-calls" };
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -685,6 +734,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
+  const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -708,6 +758,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflLeasingTool
         ? [{ name: FFL_LEASING_TOOL_NAME, description: FFL_LEASING_TOOL_DESC, inputSchema: FFL_LEASING_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflSalesCallsTool
+        ? [{ name: FFL_SALES_TOOL_NAME, description: FFL_SALES_TOOL_DESC, inputSchema: FFL_SALES_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -811,6 +864,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_LEASING_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_SALES_TOOL_NAME) {
+      if (!includeFflSalesCallsTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflSalesCalls(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_SALES_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

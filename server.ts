@@ -7,6 +7,12 @@
  *   - POST/GET /api/mcp                   → the VestLaunch read MCP (Bearer-protected)
  *   - GET/POST /api/cron/daily-lead-count → the daily Sales lead-count trigger
  *   - GET/POST /api/cron/daily-occupancy  → the daily FFL occupancy trigger (Agent #2)
+ *   - GET/POST /api/cron/daily-showmojo   → the daily FFL ShowMojo/Homes trigger
+ *
+ * ⚠️ ROUTING RULE (learned 2026-06-09): adding a file under api/cron/ does NOT
+ * create a route. Every new cron/endpoint MUST also be (1) imported here,
+ * (2) added to the route checks below, and (3) listed in the /health payload —
+ * or Vercel's cron will fire into the catch-all 404 silently.
  *
  * The repo's STDIO MCP (src/* → dist/*) is unrelated and unchanged; it is
  * hidden from Vercel via .vercelignore so it isn't picked as the entrypoint.
@@ -21,6 +27,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import mcpHandler from "./api/mcp";
 import cronHandler from "./api/cron/daily-lead-count";
 import occupancyCronHandler from "./api/cron/daily-occupancy";
+import showmojoCronHandler from "./api/cron/daily-showmojo";
 
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   try {
@@ -39,13 +46,22 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await occupancyCronHandler(req, res);
       return;
     }
+    if (path === "/api/cron/daily-showmojo") {
+      await showmojoCronHandler(req, res);
+      return;
+    }
     if (path === "/" || path === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
           status: "ok",
           service: "vestlaunch-mcp",
-          endpoints: ["/api/mcp", "/api/cron/daily-lead-count", "/api/cron/daily-occupancy"],
+          endpoints: [
+            "/api/mcp",
+            "/api/cron/daily-lead-count",
+            "/api/cron/daily-occupancy",
+            "/api/cron/daily-showmojo",
+          ],
         }),
       );
       return;

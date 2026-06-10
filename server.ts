@@ -28,6 +28,7 @@ import mcpHandler from "./api/mcp";
 import cronHandler from "./api/cron/daily-lead-count";
 import occupancyCronHandler from "./api/cron/daily-occupancy";
 import showmojoCronHandler from "./api/cron/daily-showmojo";
+import cfaCronHandler from "./api/cron/daily-cfa";
 
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   try {
@@ -50,6 +51,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await showmojoCronHandler(req, res);
       return;
     }
+    if (path === "/api/cron/daily-cfa") {
+      await cfaCronHandler(req, res);
+      return;
+    }
     if (path === "/" || path === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
@@ -61,6 +66,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/daily-lead-count",
             "/api/cron/daily-occupancy",
             "/api/cron/daily-showmojo",
+            "/api/cron/daily-cfa",
           ],
         }),
       );

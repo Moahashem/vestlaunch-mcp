@@ -693,6 +693,47 @@ async function getFflSalesCalls(cfg: Cfg, args: Record<string, unknown>): Promis
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-sales-calls" };
 }
 
+// --- SMART TOOL: get_cfa_numbers ---
+// Thin-agent / smart-tools (D13). Returns the CFA (Cranbrook Forest / ResMan) Company
+// Numbers rows computed server-side: Occupancy row 5 (B5/F5/G5), Renewals row 10
+// (B10-F10), Delinquency row 15 (B15-F15) - mirrors the FFL row definitions (Mo
+// 2026-06-10). ResMan has NO API: a fetcher on the FFL VPS exports the Cranbrook CSVs
+// headlessly pre-dawn and pushes them to ffl-crm; /api/v1/analytics/cfa-numbers computes
+// on read. Reads that native endpoint - no fallback. READ-ONLY.
+const CFA_TOOL_NAME = "get_cfa_numbers";
+const CFA_TOOL_DESC =
+  "Smart server-side aggregation: returns the CFA (Cranbrook Forest Apartments / ResMan) " +
+  "Company Numbers rows - Occupancy row 5 (B5/F5/G5), Renewals row 10 (B10-F10), Delinquency " +
+  "row 15 (B15-F15) - mirroring the FFL row definitions. Data comes from the pre-dawn VPS " +
+  "ResMan fetcher via ffl-crm. CRITICAL: response includes `stale` - when stale=true the data " +
+  "is NOT from today (America/Chicago) and the agent MUST NOT write any CFA cell (write " +
+  "nothing + flag). Cells that return null are unmapped/unavailable and MUST be skipped, " +
+  "never guessed. Returns { stale, data_date_ct, occupancy, renewals, delinquency, " +
+  "report_status, raw_previews, cells, definition }. " +
+  "Source = /api/v1/analytics/cfa-numbers. No arguments. Read-only.";
+const CFA_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getCfaNumbers(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/cfa-numbers");
+  if (!resp.success) {
+    throw new Error(
+      `cfa-numbers endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/cfa-numbers (ffl-crm PR #583) to be deployed, " +
+        "the Bearer key to have scope properties:read (or *), and the VPS ResMan fetcher to have " +
+        "pushed at least once (check /opt/ffl-resman-fetcher/last-run.json on the VPS).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).stale !== "boolean") {
+    throw new Error("cfa-numbers endpoint returned an unexpected shape (no boolean stale flag).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/cfa-numbers" };
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -735,6 +776,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
+  const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -761,6 +803,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflSalesCallsTool
         ? [{ name: FFL_SALES_TOOL_NAME, description: FFL_SALES_TOOL_DESC, inputSchema: FFL_SALES_TOOL_SCHEMA }]
+        : []),
+  ...(includeCfaTool
+        ? [{ name: CFA_TOOL_NAME, description: CFA_TOOL_DESC, inputSchema: CFA_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -881,6 +926,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_SALES_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === CFA_TOOL_NAME) {
+      if (!includeCfaTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getCfaNumbers(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${CFA_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

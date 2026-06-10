@@ -27,6 +27,8 @@
  *   FFL_VAULT_ID          — vlt_011CbdGFbUSSxVsDm7Mymq77  (ffl-mcp)
  *   CRON_SECRET           — random string; gates this endpoint
  *   FFL_DAILY_PROMPT      — optional; overrides the default kickoff message
+ *                           (the tab-housekeeping addendum below is appended
+ *                           to EITHER prompt, so it applies regardless)
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -47,6 +49,32 @@ const DEFAULT_PROMPT = [
   "If count_landlord_leads fails or returns implausible data (e.g. total_pulled",
   "is 0 or far below ~10,000), DO NOT write or guess — leave B26:E26 for manual",
   "entry and clearly report the failure.",
+].join(" ");
+
+/**
+ * Tab housekeeping (Mo, 2026-06-09): keep only the trailing 7 days of daily
+ * tabs visible so the team isn't scrolling through months of tabs. HIDE only —
+ * data is never deleted and any tab can be unhidden from the Sheets UI.
+ * Appended to the kickoff prompt (env-override or default) so it always
+ * applies. Runs LAST and must never block the lead counts.
+ */
+const HOUSEKEEPING_ADDENDUM = [
+  "AFTER your main job is fully done (tab created, rows written, read-back",
+  "reported), perform one extra TAB-STEWARD housekeeping step — this is part of",
+  "your tab-lifecycle authority from Mo and does not violate your cell-scope",
+  "rules (you still write only your own cells): keep only the trailing 7",
+  "calendar days of DATE tabs visible. (1) GET the tab list via the Zapier raw",
+  "request action: https://sheets.googleapis.com/v4/spreadsheets/1cZdZC2EW7yPILZXwDR7D4H180CuvdY1e7VGuO-Jz30k?fields=sheets.properties(sheetId,title,hidden)",
+  "(2) A tab must be HIDDEN if and only if: its title parses as M.D.YYYY (skip",
+  "any title that does not match exactly), AND its date is OLDER than (today",
+  "minus 6 days) in America/Chicago, AND it is not already hidden. (3) If any",
+  "qualify, send ONE Sheets batchUpdate via the Zapier raw MUTATING request to",
+  "https://sheets.googleapis.com/v4/spreadsheets/1cZdZC2EW7yPILZXwDR7D4H180CuvdY1e7VGuO-Jz30k:batchUpdate",
+  'with the body as a PRE-SERIALIZED JSON STRING: {"requests":[{"updateSheetProperties":{"properties":{"sheetId":<id>,"hidden":true},"fields":"hidden"}},...]}',
+  "(4) HIDE ONLY — never delete, rename, or unhide a tab, never hide today's",
+  "tab or any non-date tab, and never touch cell values during this step.",
+  "(5) If this step errors or you are unsure about any tab, SKIP it and note",
+  "that in your report — housekeeping must NEVER fail or delay the lead counts.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -70,7 +98,8 @@ export default async function handler(
   const agentId = process.env.FFL_AGENT_ID;
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
-  const prompt = process.env.FFL_DAILY_PROMPT?.trim() || DEFAULT_PROMPT;
+  const basePrompt = process.env.FFL_DAILY_PROMPT?.trim() || DEFAULT_PROMPT;
+  const prompt = `${basePrompt}\n\n${HOUSEKEEPING_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

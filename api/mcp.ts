@@ -734,6 +734,53 @@ async function getCfaNumbers(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/cfa-numbers" };
 }
 
+// --- SMART TOOL: get_ffl_sales_signups ---
+// Thin-agent / smart-tools (D13). Returns FFL "Sales - Sign Ups" metrics (Company
+// Numbers row 29, B29-E29) computed server-side. LOCKED with Mo 2026-06-10: a Sign Up
+// = a WON landlord lead - a "Landlord Leads"-pipeline opportunity at SIGNED_CLIENT,
+// counted in the period it SIGNED (signedAt -> closedAt -> stageChangedAt). Reads the
+// native CRM endpoint /api/v1/analytics/ffl-sales-signups - no fallback. READ-ONLY.
+const FFL_SIGNUPS_TOOL_NAME = "get_ffl_sales_signups";
+const FFL_SIGNUPS_TOOL_DESC =
+  "Smart server-side aggregation: returns FFL 'Sales - Sign Ups' metrics for Company Numbers " +
+  "row 29 (B29-E29). A Sign Up = a WON landlord lead: a 'Landlord Leads'-pipeline opportunity " +
+  "whose stage is SIGNED_CLIENT, counted in the period it SIGNED (signedAt, fallback closedAt, " +
+  "fallback stageChangedAt; self-serve counts). Returns { this_week (B29), this_month (C29), " +
+  "last_month (D29), quarter (E29), total_signed_all_time, signed_missing_dates, as_of, " +
+  "window_bounds, cells, definition }. Windows = America/Chicago, week Sun-Sat - identical to " +
+  "rows 26/27. Optional 'as_of' (YYYY-MM-DD). Source = /api/v1/analytics/ffl-sales-signups. Read-only.";
+const FFL_SIGNUPS_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    as_of: {
+      type: "string",
+      description:
+        "Optional reference date YYYY-MM-DD (America/Chicago). Windows computed as of the end " +
+        "of that day. Defaults to the current time.",
+    },
+  },
+  additionalProperties: false,
+};
+
+async function getFflSalesSignups(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
+  const asOf = typeof args.as_of === "string" ? args.as_of.trim() : "";
+  const query: Record<string, unknown> = {};
+  if (asOf) query.as_of = asOf;
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-sales-signups", query);
+  if (!resp.success) {
+    throw new Error(
+      `ffl-sales-signups endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-sales-signups (ffl-crm PR #586) to be deployed " +
+        "and the Bearer key to have scope opportunities:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).this_week !== "number") {
+    throw new Error("ffl-sales-signups endpoint returned an unexpected shape (no numeric this_week).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-sales-signups" };
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -777,6 +824,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
+  const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -806,6 +854,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
   ...(includeCfaTool
         ? [{ name: CFA_TOOL_NAME, description: CFA_TOOL_DESC, inputSchema: CFA_TOOL_SCHEMA }]
+        : []),
+      ...(includeSignupsTool
+        ? [{ name: FFL_SIGNUPS_TOOL_NAME, description: FFL_SIGNUPS_TOOL_DESC, inputSchema: FFL_SIGNUPS_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -943,6 +994,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${CFA_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_SIGNUPS_TOOL_NAME) {
+      if (!includeSignupsTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflSalesSignups(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_SIGNUPS_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

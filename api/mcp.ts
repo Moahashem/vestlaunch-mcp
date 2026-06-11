@@ -781,6 +781,37 @@ async function getFflSalesSignups(cfg: Cfg, args: Record<string, unknown>): Prom
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-sales-signups" };
 }
 
+// --- SMART TOOL: get_ffl_huddle_sales ---
+// Morning-huddle sales brief (Mo 2026-06-10): server-composed notes block for
+// Company Numbers H47 (H46 = header). READ-ONLY.
+const FFL_HUDDLE_TOOL_NAME = "get_ffl_huddle_sales";
+const FFL_HUDDLE_TOOL_DESC =
+  "Morning-huddle sales brief for Company Numbers H46/H47: returns { h46_header, " +
+  "h47_notes_block (write VERBATIM into H47), components { new_leads_24h, agreements_out, " +
+  "decision_pending } }. Contents: new landlord leads in the last 24h, agreements out " +
+  "awaiting signature (days waiting), decision-pending (oldest first). " +
+  "Source = /api/v1/analytics/ffl-huddle-sales. No arguments. Read-only.";
+const FFL_HUDDLE_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflHuddleSales(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-huddle-sales");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-huddle-sales endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "Requires GET /api/v1/analytics/ffl-huddle-sales (ffl-crm PR #588) deployed and scope opportunities:read.",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).h47_notes_block !== "string") {
+    throw new Error("ffl-huddle-sales endpoint returned an unexpected shape (no h47_notes_block).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-huddle-sales" };
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -824,7 +855,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
-  const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
+  const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);\n  const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -857,6 +888,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeSignupsTool
         ? [{ name: FFL_SIGNUPS_TOOL_NAME, description: FFL_SIGNUPS_TOOL_DESC, inputSchema: FFL_SIGNUPS_TOOL_SCHEMA }]
+        : []),
+      ...(includeHuddleTool
+        ? [{ name: FFL_HUDDLE_TOOL_NAME, description: FFL_HUDDLE_TOOL_DESC, inputSchema: FFL_HUDDLE_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -1017,7 +1051,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       }
     }
 
-    const def = byName.get(name);
+    if (name === FFL_HUDDLE_TOOL_NAME) {\n      if (!includeHuddleTool) {\n        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };\n      }\n      try {\n        const result = await getFflHuddleSales(cfg);\n        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };\n      } catch (err) {\n        return {\n          content: [\n            { type: "text", text: `Error invoking ${FFL_HUDDLE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },\n          ],\n          isError: true,\n        };\n      }\n    }\n\n    const def = byName.get(name);
     if (!def) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }

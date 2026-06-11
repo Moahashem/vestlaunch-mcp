@@ -855,7 +855,8 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
-  const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);\n  const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
+  const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
+  const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -1051,7 +1052,24 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       }
     }
 
-    if (name === FFL_HUDDLE_TOOL_NAME) {\n      if (!includeHuddleTool) {\n        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };\n      }\n      try {\n        const result = await getFflHuddleSales(cfg);\n        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };\n      } catch (err) {\n        return {\n          content: [\n            { type: "text", text: `Error invoking ${FFL_HUDDLE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },\n          ],\n          isError: true,\n        };\n      }\n    }\n\n    const def = byName.get(name);
+    if (name === FFL_HUDDLE_TOOL_NAME) {
+      if (!includeHuddleTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflHuddleSales(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_HUDDLE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    const def = byName.get(name);
     if (!def) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }

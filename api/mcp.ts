@@ -787,10 +787,10 @@ async function getFflSalesSignups(cfg: Cfg, args: Record<string, unknown>): Prom
 const FFL_HUDDLE_TOOL_NAME = "get_ffl_huddle_sales";
 const FFL_HUDDLE_TOOL_DESC =
   "Morning-huddle sales brief for Company Numbers H46/H47: returns { h46_header, " +
-  "h47_notes_block (write VERBATIM into H47), components { new_leads_24h, agreements_out, " +
-  "decision_pending } }. Contents: new landlord leads in the last 24h, agreements out " +
-  "awaiting signature (days waiting), decision-pending (oldest first). " +
-  "Source = /api/v1/analytics/ffl-huddle-sales. No arguments. Read-only.";
+  "h47_notes_block (write VERBATIM into H47), components { new_leads_24h, hot_email_opens_24h, " +
+  "decision_pending } }. Contents: new landlord leads in the last 24h, HOT leads that opened " +
+  "our emails in the last 24h (open counts + hours ago), decision-pending (only when > 0). " +
+  "Source = /api/v1/analytics/ffl-huddle-sales (v2). No arguments. Read-only.";
 const FFL_HUDDLE_TOOL_SCHEMA = {
   type: "object" as const,
   properties: {},
@@ -810,6 +810,39 @@ async function getFflHuddleSales(cfg: Cfg): Promise<unknown> {
     throw new Error("ffl-huddle-sales endpoint returned an unexpected shape (no h47_notes_block).");
   }
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-huddle-sales" };
+}
+
+// --- SMART TOOL: get_ffl_huddle_appfolio ---
+// Morning-huddle AppFolio brief (Mo 2026-06-10): server-composed notes block for
+// Company Numbers H40/H41 — upcoming move-ins this+next week with deposit /
+// first-month payment status. READ-ONLY.
+const FFL_HUDAF_TOOL_NAME = "get_ffl_huddle_appfolio";
+const FFL_HUDAF_TOOL_DESC =
+  "Morning-huddle AppFolio brief for Company Numbers H40/H41: returns { h40_header, " +
+  "h41_notes_block (write VERBATIM into H41), move_ins_this_week, move_ins_next_week, " +
+  "receipts_available }. Contents: scheduled move-ins this week and next week (Sun-Sat CT) " +
+  "with whether the tenant has paid the security deposit and first month's rent " +
+  "(deposit_register receipts vs amounts due). Source = /api/v1/analytics/ffl-huddle-appfolio. " +
+  "No arguments. Read-only.";
+const FFL_HUDAF_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflHuddleAppfolio(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-huddle-appfolio");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-huddle-appfolio endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "Requires GET /api/v1/analytics/ffl-huddle-appfolio (ffl-crm PR #589) deployed and scope properties:read.",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).h41_notes_block !== "string") {
+    throw new Error("ffl-huddle-appfolio endpoint returned an unexpected shape (no h41_notes_block).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-huddle-appfolio" };
 }
 
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
@@ -857,6 +890,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
   const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
+  const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -892,6 +926,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeHuddleTool
         ? [{ name: FFL_HUDDLE_TOOL_NAME, description: FFL_HUDDLE_TOOL_DESC, inputSchema: FFL_HUDDLE_TOOL_SCHEMA }]
+        : []),
+      ...(includeHudAfTool
+        ? [{ name: FFL_HUDAF_TOOL_NAME, description: FFL_HUDAF_TOOL_DESC, inputSchema: FFL_HUDAF_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -1063,6 +1100,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_HUDDLE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_HUDAF_TOOL_NAME) {
+      if (!includeHudAfTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflHuddleAppfolio(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_HUDAF_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

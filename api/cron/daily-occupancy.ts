@@ -41,15 +41,13 @@ const BETA_HEADER = "managed-agents-2026-04-01";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 const DEFAULT_PROMPT = [
-  "Run your daily FFL occupancy update for today (America/Chicago).",
-  "Call your get_ffl_occupancy tool ONCE (no arguments) — do NOT compute anything",
-  "yourself. Confirm today's tab (M.D.2026) ALREADY EXISTS in the Company Numbers",
-  "sheet; do NOT create it — if it is missing, STOP and report so it can be created",
-  "first. Then write the FFL Occupancy row in one batch: B4=occupancy_pct,",
-  "F4=occupied, G4=total_doors. Finally read B4/F4/G4 back and report exactly what",
-  "you wrote plus the excluded dummy properties. If get_ffl_occupancy fails or",
-  "total_doors is implausible (under 250 or over 400), DO NOT write or guess —",
-  "leave the cells for manual entry and clearly report the failure.",
+  "Run your full daily FFL update for today (America/Chicago) — ALL FIVE items",
+  "still missing per your A50 status: occupancy (row 4), renewals (row 9 + H28/H29),",
+  "delinquency (row 14), apps & leases (row 23), and the huddle notes (H40/H41).",
+  "Confirm today's tab (M.D.2026) ALREADY EXISTS; do NOT create it — if missing,",
+  "STOP and report. Follow your system prompt exactly: gates, clear-on-error,",
+  "verbatim notes block, A50 flags. Read back what you wrote and report which items",
+  "were filled, skipped (already done), or failed.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {

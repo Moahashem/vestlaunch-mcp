@@ -3,6 +3,9 @@
   "buildCommand": "echo 'no build step — Vercel bundles server.ts directly'",
   "crons": [
     { "path": "/api/cron/daily-lead-count", "schedule": "0 11 * * *" },
+    { "path": "/api/cron/daily-lead-count", "schedule": "20 11 * * *" },
+    { "path": "/api/cron/daily-lead-count", "schedule": "40 11 * * *" },
+    { "path": "/api/cron/daily-lead-count", "schedule": "20 12 * * *" },
     { "path": "/api/cron/daily-occupancy", "schedule": "10 11 * * *" },
     { "path": "/api/cron/daily-occupancy", "schedule": "30 11 * * *" },
     { "path": "/api/cron/daily-occupancy", "schedule": "50 11 * * *" },

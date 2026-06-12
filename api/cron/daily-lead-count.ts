@@ -40,15 +40,15 @@ const BETA_HEADER = "managed-agents-2026-04-01";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 const DEFAULT_PROMPT = [
-  "Run your daily landlord-lead count for today (America/Chicago).",
-  "Call your count_landlord_leads tool ONCE (no arguments) to get the four",
-  "window counts — do NOT paginate opportunities yourself. Ensure today's tab",
-  "(M.D.2026) exists in the Company Numbers sheet, then write the four counts",
-  "to B26:E26 (Sales -> Leads): B26=this_week, C26=this_month, D26=last_month,",
-  "E26=quarter. Finally, read B26:E26 back and report exactly what you wrote.",
-  "If count_landlord_leads fails or returns implausible data (e.g. total_pulled",
-  "is 0 or far below ~10,000), DO NOT write or guess — leave B26:E26 for manual",
-  "entry and clearly report the failure.",
+  "Run your FULL daily Sales update for today (America/Chicago) — every item",
+  "your status cell A54 does not already mark done for TODAY: the day's tab",
+  "(create it if missing — you are the tab steward), Leads row 26, Calls row",
+  "27, Sign Ups row 29, and the huddle notes H46/H47 (verbatim block + your",
+  "RADAR analysis). Follow your system prompt exactly: read A54 first, skip",
+  "done items, work through ALL remaining items even if one fails, update A54",
+  "after each, clear-on-error, never row 28. This fire may be a RETRY — that",
+  "is normal; A54 makes it idempotent. Read back what you wrote and report",
+  "which items were filled, skipped (already done), or failed.",
 ].join(" ");
 
 /**

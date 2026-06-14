@@ -157,7 +157,13 @@ export default async function handler(
   // Dedicated bearer for THIS server (falls back to the shared MCP_BEARER_TOKEN).
   // Using its own token means the vault credential for /api/ruckus-mcp can be set
   // to a fresh value without needing the (write-only/unrecoverable) MCP_BEARER_TOKEN.
-  const expected = process.env.RUCKUS_MCP_BEARER || process.env.MCP_BEARER_TOKEN;
+  // Accepts (in order) a dedicated RUCKUS_MCP_BEARER, else the already-set
+  // RUCKUS_SEND_TOKEN, else the shared MCP_BEARER_TOKEN. The vault injects this as
+  // the Authorization header server-side, so the model never sees it. Reusing
+  // RUCKUS_SEND_TOKEN means no NEW env var is needed and the vault credential can be
+  // set to that (recoverable) value.
+  const expected =
+    process.env.RUCKUS_MCP_BEARER || process.env.RUCKUS_SEND_TOKEN || process.env.MCP_BEARER_TOKEN;
   if (!expected || req.headers["authorization"] !== `Bearer ${expected}`) {
     sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });
     return;

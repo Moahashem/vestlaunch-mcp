@@ -19,7 +19,9 @@
  * vault injects it identically.
  *
  * Env (set by Mo in Vercel — never hard-coded):
- *   MCP_BEARER_TOKEN     — bearer the connecting agent must present (shared w/ read MCP)
+ *   RUCKUS_MCP_BEARER     — bearer the connecting agent must present (set this fresh in env
+ *                          + the vault credential for /api/ruckus-mcp). Falls back to
+ *                          MCP_BEARER_TOKEN if unset.
  *   RUCKUS_SEND_TOKEN    — bearer for the CRM send endpoint (= ffl-crm CRON_SECRET). SECRET.
  *   RUCKUS_SEND_BASE_URL — optional CRM base; defaults to VESTLAUNCH_BASE_URL,
  *                          then https://crm.vestlaunch.com
@@ -152,7 +154,10 @@ export default async function handler(
   req: IncomingMessage & { body?: unknown },
   res: ServerResponse,
 ): Promise<void> {
-  const expected = process.env.MCP_BEARER_TOKEN;
+  // Dedicated bearer for THIS server (falls back to the shared MCP_BEARER_TOKEN).
+  // Using its own token means the vault credential for /api/ruckus-mcp can be set
+  // to a fresh value without needing the (write-only/unrecoverable) MCP_BEARER_TOKEN.
+  const expected = process.env.RUCKUS_MCP_BEARER || process.env.MCP_BEARER_TOKEN;
   if (!expected || req.headers["authorization"] !== `Bearer ${expected}`) {
     sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });
     return;

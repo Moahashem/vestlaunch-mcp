@@ -644,205 +644,67 @@ async function getFflLeasing(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-leasing" };
 }
 
-// --- SMART TOOL: get_ffl_sales_calls ---
-// Thin-agent / smart-tools (D13). Returns FFL "Sales - Calls (made contact or discovery
-// call)" metrics (Company Numbers row 27, B27-E27) computed server-side. MATCHES the
-// Smarketing scorecard's "Appointments Completed" definition (locked with Mo 2026-06-04).
-// Reads the native CRM endpoint /api/v1/analytics/ffl-sales-calls - no fallback. READ-ONLY.
-const FFL_SALES_TOOL_NAME = "get_ffl_sales_calls";
-const FFL_SALES_TOOL_DESC =
-  "Smart server-side aggregation: returns FFL 'Sales - Calls (made contact or discovery call)' " +
-  "metrics for Company Numbers row 27 (B27-E27). MATCHES the scorecard 'Appointments Completed' " +
-  "rule: each SALES-workspace opportunity counts ONCE, in the period of its earliest appointment " +
-  "evidence - (a) a logged phone call >5 min before signing, (b) a stage move into Discovery " +
-  "Completed / Proposal Sent / Decision Pending / Agreement Out, or (c) a human (non-self-serve) " +
-  "SIGNED_CLIENT signing. Opps with no evidence (only 'made contact'/Connected, or self-serve " +
-  "signups) are NOT counted. Returns { this_week (B27), this_month (C27), last_month (D27), " +
-  "quarter (E27), appts_considered, as_of, window_bounds, cells, definition }. Windows = " +
-  "America/Chicago, week Sun-Sat (lines up with row 26). Optional 'as_of' (YYYY-MM-DD). " +
-  "Source = /api/v1/analytics/ffl-sales-calls. Read-only.";
-const FFL_SALES_TOOL_SCHEMA = {
+// --- ACTING TOOL: ruckus_send ---
+// Ruckus (Chief of Staff) reply path. Unlike the read tools above, this POSTs a
+// message into Ruckus's RingCentral channel by calling the ffl-crm endpoint
+// POST /api/ringcentral/ruckus-send (which posts as the Ruckus bot). The CRM
+// endpoint is gated by RUCKUS_SEND_TOKEN, held only in env here and injected
+// server-side -- the model never sees it. Folded into THIS shared read MCP on
+// purpose so Ruckus reaches it through the existing vault credential (no separate
+// MCP server / credential needed). Internal-only (posts to one private channel).
+const RUCKUS_SEND_TOOL_NAME = "ruckus_send";
+const RUCKUS_SEND_TOOL_DESC =
+  "Post a message into Ruckus's own RingCentral channel (Ruckus's reply path as FFL " +
+  "Chief of Staff). Calls ffl-crm POST /api/ringcentral/ruckus-send, which posts as the " +
+  "Ruckus bot. Use this to reply to a person or to post your morning brief -- your text is " +
+  "NOT auto-delivered, you MUST call this tool to be heard. Args: { text } (required); " +
+  "optional { chatId } overrides the default channel. Returns { ok, chatId }. Internal-only.";
+const RUCKUS_SEND_TOOL_SCHEMA = {
   type: "object" as const,
   properties: {
-    as_of: {
-      type: "string",
-      description:
-        "Optional reference date YYYY-MM-DD (America/Chicago). Windows computed as of the end " +
-        "of that day. Defaults to the current time.",
-    },
+    text: { type: "string", description: "The message text to post into Ruckus's channel." },
+    chatId: { type: "string", description: "Optional RingCentral chat id to override the default Ruckus channel." },
   },
+  required: ["text"],
   additionalProperties: false,
 };
 
-async function getFflSalesCalls(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
-  const asOf = typeof args.as_of === "string" ? args.as_of.trim() : "";
-  const query: Record<string, unknown> = {};
-  if (asOf) query.as_of = asOf;
-  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-sales-calls", query);
-  if (!resp.success) {
+async function ruckusSend(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
+  const text = typeof args.text === "string" ? args.text.trim() : "";
+  if (!text) throw new Error("ruckus_send requires a non-empty 'text'.");
+  const token = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  if (!token) {
     throw new Error(
-      `ffl-sales-calls endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
-        "This tool requires GET /api/v1/analytics/ffl-sales-calls (ffl-crm PR #579) to be deployed " +
-        "and the Bearer key to have scope opportunities:read (or *).",
+      "ruckus_send is not configured: set RUCKUS_SEND_TOKEN in this MCP's env " +
+        "(= the ffl-crm CRON_SECRET that gates /api/ringcentral/ruckus-send).",
     );
   }
-  const d = resp.data;
-  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).this_week !== "number") {
-    throw new Error("ffl-sales-calls endpoint returned an unexpected shape (no numeric this_week).");
+  const body: Record<string, unknown> = { text };
+  if (typeof args.chatId === "string" && args.chatId.trim()) body.chatId = args.chatId.trim();
+  const url = `${cfg.baseUrl}/api/ringcentral/ruckus-send`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "User-Agent": "vestlaunch-mcp-http/0.1.0",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const out = await res.text();
+    let json: unknown = null;
+    try { json = out ? JSON.parse(out) : null; } catch { json = { raw: out }; }
+    if (!res.ok) return { ok: false, status: res.status, error: json ?? out };
+    return json ?? { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
   }
-  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-sales-calls" };
-}
-
-// --- SMART TOOL: get_cfa_numbers ---
-// Thin-agent / smart-tools (D13). Returns the CFA (Cranbrook Forest / ResMan) Company
-// Numbers rows computed server-side: Occupancy row 5 (B5/F5/G5), Renewals row 10
-// (B10-F10), Delinquency row 15 (B15-F15) - mirrors the FFL row definitions (Mo
-// 2026-06-10). ResMan has NO API: a fetcher on the FFL VPS exports the Cranbrook CSVs
-// headlessly pre-dawn and pushes them to ffl-crm; /api/v1/analytics/cfa-numbers computes
-// on read. Reads that native endpoint - no fallback. READ-ONLY.
-const CFA_TOOL_NAME = "get_cfa_numbers";
-const CFA_TOOL_DESC =
-  "Smart server-side aggregation: returns the CFA (Cranbrook Forest Apartments / ResMan) " +
-  "Company Numbers rows - Occupancy row 5 (B5/F5/G5), Renewals row 10 (B10-F10), Delinquency " +
-  "row 15 (B15-F15) - mirroring the FFL row definitions. Data comes from the pre-dawn VPS " +
-  "ResMan fetcher via ffl-crm. CRITICAL: response includes `stale` - when stale=true the data " +
-  "is NOT from today (America/Chicago) and the agent MUST NOT write any CFA cell (write " +
-  "nothing + flag). Cells that return null are unmapped/unavailable and MUST be skipped, " +
-  "never guessed. Returns { stale, data_date_ct, occupancy, renewals, delinquency, " +
-  "report_status, raw_previews, cells, definition }. " +
-  "Source = /api/v1/analytics/cfa-numbers. No arguments. Read-only.";
-const CFA_TOOL_SCHEMA = {
-  type: "object" as const,
-  properties: {},
-  additionalProperties: false,
-};
-
-async function getCfaNumbers(cfg: Cfg): Promise<unknown> {
-  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/cfa-numbers");
-  if (!resp.success) {
-    throw new Error(
-      `cfa-numbers endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
-        "This tool requires GET /api/v1/analytics/cfa-numbers (ffl-crm PR #583) to be deployed, " +
-        "the Bearer key to have scope properties:read (or *), and the VPS ResMan fetcher to have " +
-        "pushed at least once (check /opt/ffl-resman-fetcher/last-run.json on the VPS).",
-    );
-  }
-  const d = resp.data;
-  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).stale !== "boolean") {
-    throw new Error("cfa-numbers endpoint returned an unexpected shape (no boolean stale flag).");
-  }
-  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/cfa-numbers" };
-}
-
-// --- SMART TOOL: get_ffl_sales_signups ---
-// Thin-agent / smart-tools (D13). Returns FFL "Sales - Sign Ups" metrics (Company
-// Numbers row 29, B29-E29) computed server-side. LOCKED with Mo 2026-06-10: a Sign Up
-// = a WON landlord lead - a "Landlord Leads"-pipeline opportunity at SIGNED_CLIENT,
-// counted in the period it SIGNED (signedAt -> closedAt -> stageChangedAt). Reads the
-// native CRM endpoint /api/v1/analytics/ffl-sales-signups - no fallback. READ-ONLY.
-const FFL_SIGNUPS_TOOL_NAME = "get_ffl_sales_signups";
-const FFL_SIGNUPS_TOOL_DESC =
-  "Smart server-side aggregation: returns FFL 'Sales - Sign Ups' metrics for Company Numbers " +
-  "row 29 (B29-E29). A Sign Up = a WON landlord lead: a 'Landlord Leads'-pipeline opportunity " +
-  "whose stage is SIGNED_CLIENT, counted in the period it SIGNED (signedAt, fallback closedAt, " +
-  "fallback stageChangedAt; self-serve counts). Returns { this_week (B29), this_month (C29), " +
-  "last_month (D29), quarter (E29), total_signed_all_time, signed_missing_dates, as_of, " +
-  "window_bounds, cells, definition }. Windows = America/Chicago, week Sun-Sat - identical to " +
-  "rows 26/27. Optional 'as_of' (YYYY-MM-DD). Source = /api/v1/analytics/ffl-sales-signups. Read-only.";
-const FFL_SIGNUPS_TOOL_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    as_of: {
-      type: "string",
-      description:
-        "Optional reference date YYYY-MM-DD (America/Chicago). Windows computed as of the end " +
-        "of that day. Defaults to the current time.",
-    },
-  },
-  additionalProperties: false,
-};
-
-async function getFflSalesSignups(cfg: Cfg, args: Record<string, unknown>): Promise<unknown> {
-  const asOf = typeof args.as_of === "string" ? args.as_of.trim() : "";
-  const query: Record<string, unknown> = {};
-  if (asOf) query.as_of = asOf;
-  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-sales-signups", query);
-  if (!resp.success) {
-    throw new Error(
-      `ffl-sales-signups endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
-        "This tool requires GET /api/v1/analytics/ffl-sales-signups (ffl-crm PR #586) to be deployed " +
-        "and the Bearer key to have scope opportunities:read (or *).",
-    );
-  }
-  const d = resp.data;
-  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).this_week !== "number") {
-    throw new Error("ffl-sales-signups endpoint returned an unexpected shape (no numeric this_week).");
-  }
-  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-sales-signups" };
-}
-
-// --- SMART TOOL: get_ffl_huddle_sales ---
-// Morning-huddle sales brief (Mo 2026-06-10): server-composed notes block for
-// Company Numbers H47 (H46 = header). READ-ONLY.
-const FFL_HUDDLE_TOOL_NAME = "get_ffl_huddle_sales";
-const FFL_HUDDLE_TOOL_DESC =
-  "Morning-huddle sales brief for Company Numbers H46/H47: returns { h46_header, " +
-  "h47_notes_block (write VERBATIM into H47), components { new_leads_24h, hot_email_opens_24h, " +
-  "decision_pending } }. Contents: new landlord leads in the last 24h, HOT leads that opened " +
-  "our emails in the last 24h (open counts + hours ago), decision-pending (only when > 0). " +
-  "Source = /api/v1/analytics/ffl-huddle-sales (v2). No arguments. Read-only.";
-const FFL_HUDDLE_TOOL_SCHEMA = {
-  type: "object" as const,
-  properties: {},
-  additionalProperties: false,
-};
-
-async function getFflHuddleSales(cfg: Cfg): Promise<unknown> {
-  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-huddle-sales");
-  if (!resp.success) {
-    throw new Error(
-      `ffl-huddle-sales endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
-        "Requires GET /api/v1/analytics/ffl-huddle-sales (ffl-crm PR #588) deployed and scope opportunities:read.",
-    );
-  }
-  const d = resp.data;
-  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).h47_notes_block !== "string") {
-    throw new Error("ffl-huddle-sales endpoint returned an unexpected shape (no h47_notes_block).");
-  }
-  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-huddle-sales" };
-}
-
-// --- SMART TOOL: get_ffl_huddle_appfolio ---
-// Morning-huddle AppFolio brief (Mo 2026-06-10): server-composed notes block for
-// Company Numbers H40/H41 — upcoming move-ins this+next week with deposit /
-// first-month payment status. READ-ONLY.
-const FFL_HUDAF_TOOL_NAME = "get_ffl_huddle_appfolio";
-const FFL_HUDAF_TOOL_DESC =
-  "Morning-huddle AppFolio brief for Company Numbers H40/H41: returns { h40_header, " +
-  "h41_notes_block (write VERBATIM into H41), move_ins_this_week, move_ins_next_week, " +
-  "receipts_available }. Contents: scheduled move-ins this week and next week (Sun-Sat CT) " +
-  "with whether the tenant has paid the security deposit and first month's rent " +
-  "(deposit_register receipts vs amounts due). Source = /api/v1/analytics/ffl-huddle-appfolio. " +
-  "No arguments. Read-only.";
-const FFL_HUDAF_TOOL_SCHEMA = {
-  type: "object" as const,
-  properties: {},
-  additionalProperties: false,
-};
-
-async function getFflHuddleAppfolio(cfg: Cfg): Promise<unknown> {
-  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-huddle-appfolio");
-  if (!resp.success) {
-    throw new Error(
-      `ffl-huddle-appfolio endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
-        "Requires GET /api/v1/analytics/ffl-huddle-appfolio (ffl-crm PR #589) deployed and scope properties:read.",
-    );
-  }
-  const d = resp.data;
-  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).h41_notes_block !== "string") {
-    throw new Error("ffl-huddle-appfolio endpoint returned an unexpected shape (no h41_notes_block).");
-  }
-  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-huddle-appfolio" };
 }
 
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
@@ -886,11 +748,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
-  const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
-  const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
-  const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
-  const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
-  const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
+  const includeRuckusSendTool = !toolFilter || toolFilter.has(RUCKUS_SEND_TOOL_NAME);
 
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
@@ -915,20 +773,8 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       ...(includeFflLeasingTool
         ? [{ name: FFL_LEASING_TOOL_NAME, description: FFL_LEASING_TOOL_DESC, inputSchema: FFL_LEASING_TOOL_SCHEMA }]
         : []),
-      ...(includeFflSalesCallsTool
-        ? [{ name: FFL_SALES_TOOL_NAME, description: FFL_SALES_TOOL_DESC, inputSchema: FFL_SALES_TOOL_SCHEMA }]
-        : []),
-  ...(includeCfaTool
-        ? [{ name: CFA_TOOL_NAME, description: CFA_TOOL_DESC, inputSchema: CFA_TOOL_SCHEMA }]
-        : []),
-      ...(includeSignupsTool
-        ? [{ name: FFL_SIGNUPS_TOOL_NAME, description: FFL_SIGNUPS_TOOL_DESC, inputSchema: FFL_SIGNUPS_TOOL_SCHEMA }]
-        : []),
-      ...(includeHuddleTool
-        ? [{ name: FFL_HUDDLE_TOOL_NAME, description: FFL_HUDDLE_TOOL_DESC, inputSchema: FFL_HUDDLE_TOOL_SCHEMA }]
-        : []),
-      ...(includeHudAfTool
-        ? [{ name: FFL_HUDAF_TOOL_NAME, description: FFL_HUDAF_TOOL_DESC, inputSchema: FFL_HUDAF_TOOL_SCHEMA }]
+      ...(includeRuckusSendTool
+        ? [{ name: RUCKUS_SEND_TOOL_NAME, description: RUCKUS_SEND_TOOL_DESC, inputSchema: RUCKUS_SEND_TOOL_SCHEMA }]
         : []),
     ],
   }));
@@ -1038,85 +884,17 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       }
     }
 
-    if (name === FFL_SALES_TOOL_NAME) {
-      if (!includeFflSalesCallsTool) {
+    if (name === RUCKUS_SEND_TOOL_NAME) {
+      if (!includeRuckusSendTool) {
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
       }
       try {
-        const result = await getFflSalesCalls(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        const result = await ruckusSend(cfg, (rawArgs ?? {}) as Record<string, unknown>);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return {
           content: [
-            { type: "text", text: `Error invoking ${FFL_SALES_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-
-    if (name === CFA_TOOL_NAME) {
-      if (!includeCfaTool) {
-        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-      }
-      try {
-        const result = await getCfaNumbers(cfg);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [
-            { type: "text", text: `Error invoking ${CFA_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-
-    if (name === FFL_SIGNUPS_TOOL_NAME) {
-      if (!includeSignupsTool) {
-        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-      }
-      try {
-        const result = await getFflSalesSignups(cfg, (rawArgs ?? {}) as Record<string, unknown>);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [
-            { type: "text", text: `Error invoking ${FFL_SIGNUPS_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-
-    if (name === FFL_HUDDLE_TOOL_NAME) {
-      if (!includeHuddleTool) {
-        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-      }
-      try {
-        const result = await getFflHuddleSales(cfg);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [
-            { type: "text", text: `Error invoking ${FFL_HUDDLE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-
-    if (name === FFL_HUDAF_TOOL_NAME) {
-      if (!includeHudAfTool) {
-        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-      }
-      try {
-        const result = await getFflHuddleAppfolio(cfg);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      } catch (err) {
-        return {
-          content: [
-            { type: "text", text: `Error invoking ${FFL_HUDAF_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+            { type: "text", text: `Error invoking ${RUCKUS_SEND_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

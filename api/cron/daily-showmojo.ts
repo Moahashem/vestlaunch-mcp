@@ -10,6 +10,10 @@
  * ShowMojo becomes a reusable system specialist (later: showings digests,
  * no-showing alerts, vacancy marketing) — not just a row-filler.
  *
+ * AI OPERATING SYSTEM: after kickoff, posts a best-effort heartbeat to ffl-crm
+ * /api/agent-os/heartbeat (agentKey 'showmojo') so the dashboard + Ruckus can
+ * see the morning pipeline fired. Best-effort: never breaks the run.
+ *
  * On each fire it (1) creates a Managed Agents session bound to the ShowMojo
  * agent, the shared environment, and the shared credential vault, then (2)
  * sends a `user.message` event to start the daily task. The agent runs entirely
@@ -40,8 +44,9 @@
  *   FFL_SHOWMOJO_AGENT_ID    — agent_... (the ShowMojo agent; Mo places after create)
  *   FFL_ENVIRONMENT_ID       — env_01JaER…hnr6GA  (ffl-agents, shared)
  *   FFL_VAULT_ID             — vlt_011CbdGFbUSSxVsDm7Mymq77  (ffl-mcp, shared)
- *   CRON_SECRET              — random string; gates this endpoint (shared)
+ *   CRON_SECRET              — random string; gates this endpoint + authes the heartbeat (shared)
  *   FFL_SHOWMOJO_PROMPT      — optional; overrides the default kickoff message
+ *   AGENT_OS_BASE_URL        — optional; ffl-crm base for the heartbeat (default https://crm.vestlaunch.com)
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -51,6 +56,8 @@ export const config = { maxDuration: 60 };
 const ANTHROPIC_BASE = "https://api.anthropic.com";
 const BETA_HEADER = "managed-agents-2026-04-01";
 const ANTHROPIC_VERSION = "2023-06-01";
+
+const AGENT_KEY = "showmojo";
 
 const DEFAULT_PROMPT = [
   "Run your daily FFL Homes update for today (America/Chicago).",
@@ -73,6 +80,40 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(body));
+}
+
+function heartbeatBaseUrl(): string {
+  const explicit = (process.env.AGENT_OS_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (explicit) return explicit;
+  const vest = (process.env.VESTLAUNCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (vest) return vest;
+  return "https://crm.vestlaunch.com";
+}
+
+/** Best-effort heartbeat into the AI Operating System logbook. NEVER throws. */
+async function postHeartbeat(input: { status: string; summary: string; needsHuman?: boolean }): Promise<void> {
+  const token = (process.env.CRON_SECRET ?? "").trim();
+  if (!token) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    await fetch(`${heartbeatBaseUrl()}/api/agent-os/heartbeat`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentKey: AGENT_KEY,
+        status: input.status,
+        summary: input.summary,
+        needsHuman: input.needsHuman ?? false,
+        tier: "green",
+      }),
+      signal: controller.signal,
+    });
+  } catch {
+    // swallow — heartbeat is best-effort
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export default async function handler(
@@ -100,6 +141,7 @@ export default async function handler(
     .filter(([, v]) => !v)
     .map(([k]) => k);
   if (missing.length > 0) {
+    await postHeartbeat({ status: "error", summary: `showmojo: missing env ${missing.join(", ")}`, needsHuman: true });
     json(res, 500, { ok: false, error: `Missing env: ${missing.join(", ")}` });
     return;
   }
@@ -134,6 +176,7 @@ export default async function handler(
     });
     const createText = await createRes.text();
     if (!createRes.ok) {
+      await postHeartbeat({ status: "error", summary: `showmojo: create_session failed (HTTP ${createRes.status})`, needsHuman: true });
       json(res, 502, {
         ok: false,
         stage: "create_session",
@@ -145,6 +188,7 @@ export default async function handler(
     const session = JSON.parse(createText) as { id?: string };
     const sessionId = session.id;
     if (!sessionId) {
+      await postHeartbeat({ status: "error", summary: "showmojo: create_session returned no id", needsHuman: true });
       json(res, 502, { ok: false, stage: "create_session", error: "no session id", body: createText.slice(0, 1000) });
       return;
     }
@@ -159,6 +203,7 @@ export default async function handler(
     });
     const eventText = await eventRes.text();
     if (!eventRes.ok) {
+      await postHeartbeat({ status: "error", summary: `showmojo: send_event failed (HTTP ${eventRes.status})`, needsHuman: true });
       json(res, 502, {
         ok: false,
         stage: "send_event",
@@ -169,9 +214,11 @@ export default async function handler(
       return;
     }
 
+    await postHeartbeat({ status: "ok", summary: `showmojo agent triggered for ${today} (session ${sessionId})` });
     json(res, 200, { ok: true, session_id: sessionId, date: today, triggered_at: new Date().toISOString() });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    await postHeartbeat({ status: "error", summary: `showmojo: ${msg}`, needsHuman: true });
     json(res, 500, { ok: false, error: msg });
   }
 }

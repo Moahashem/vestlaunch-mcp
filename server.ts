@@ -5,6 +5,7 @@
  * NOT use the /api zero-config functions convention). So this file is the one
  * server Vercel runs; it routes requests to the same handlers used elsewhere:
  *   - POST/GET /api/mcp                   → the VestLaunch read MCP (Bearer-protected)
+ *   - POST/GET /api/ruckus-mcp            → Ruckus's reply MCP (ruckus_send; Bearer-protected)
  *   - GET/POST /api/cron/daily-lead-count → the daily Sales lead-count trigger
  *   - GET/POST /api/cron/daily-occupancy  → the daily FFL occupancy trigger (Agent #2)
  *   - GET/POST /api/cron/daily-showmojo   → the daily FFL ShowMojo/Homes trigger
@@ -25,6 +26,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import mcpHandler from "./api/mcp";
+import ruckusMcpHandler from "./api/ruckus-mcp";
 import cronHandler from "./api/cron/daily-lead-count";
 import occupancyCronHandler from "./api/cron/daily-occupancy";
 import showmojoCronHandler from "./api/cron/daily-showmojo";
@@ -37,6 +39,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 
     if (path === "/api/mcp") {
       await mcpHandler(req as IncomingMessage & { body?: unknown }, res);
+      return;
+    }
+    if (path === "/api/ruckus-mcp") {
+      await ruckusMcpHandler(req as IncomingMessage & { body?: unknown }, res);
       return;
     }
     if (path === "/api/cron/daily-lead-count") {
@@ -63,6 +69,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
           service: "vestlaunch-mcp",
           endpoints: [
             "/api/mcp",
+            "/api/ruckus-mcp",
             "/api/cron/daily-lead-count",
             "/api/cron/daily-occupancy",
             "/api/cron/daily-showmojo",

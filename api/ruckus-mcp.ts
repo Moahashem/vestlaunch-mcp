@@ -67,11 +67,13 @@ function baseUrl(): string {
   return "https://crm.vestlaunch.com";
 }
 
-async function ruckusSend(args: Record<string, unknown>): Promise<unknown> {
+async function ruckusSend(args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
   const text = typeof args.text === "string" ? args.text.trim() : "";
   if (!text) throw new Error("ruckus_send requires a non-empty 'text'.");
 
-  const token = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  // Prefer the bearer the agent presented (the vault-injected CRM credential),
+  // forwarded straight through; fall back to the RUCKUS_SEND_TOKEN env var.
+  const token = (forwardToken ?? "").trim() || (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
   if (!token) {
     throw new Error(
       "ruckus_send is not configured: set RUCKUS_SEND_TOKEN in this MCP's env " +
@@ -113,7 +115,7 @@ async function ruckusSend(args: Record<string, unknown>): Promise<unknown> {
   }
 }
 
-function buildServer(): Server {
+function buildServer(forwardToken?: string): Server {
   const server = new Server(
     { name: "ruckus-mcp", version: "0.1.0" },
     { capabilities: { tools: {} } },
@@ -129,7 +131,7 @@ function buildServer(): Server {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
     try {
-      const result = await ruckusSend((rawArgs ?? {}) as Record<string, unknown>);
+      const result = await ruckusSend((rawArgs ?? {}) as Record<string, unknown>, forwardToken);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {
@@ -169,7 +171,11 @@ export default async function handler(
     return;
   }
 
-  const server = buildServer();
+  // Forward the agent's vault-provided bearer straight to ffl-crm ruckus-send, so the
+  // downstream call uses the SAME credential the vault injected (the CRM CRON_SECRET) —
+  // no separate RUCKUS_SEND_TOKEN sync needed. Falls back to RUCKUS_SEND_TOKEN if absent.
+  const incomingBearer = (req.headers["authorization"] ?? "").toString().replace(/^Bearer\s+/i, "").trim();
+  const server = buildServer(incomingBearer);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

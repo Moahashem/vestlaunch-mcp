@@ -6,8 +6,8 @@
  * to the CFA agent, environment, and credential vault, then (2) sends a
  * `user.message` event to start the daily task.
  *
- * AI OPERATING SYSTEM: after kickoff, posts a best-effort heartbeat to ffl-crm
- * /api/agent-os/heartbeat (agentKey 'cranbrook-cfa') so the dashboard + Ruckus can
+ * AI OPERATING SYSTEM: after kickoff, posts a best-effort run-status report to ffl-crm
+ * /api/v1/agent/run-status (agentKey 'cranbrook-cfa') so the dashboard + Ruckus can
  * see the morning pipeline fired. Best-effort: never breaks the run.
  *
  * PIPELINE ORDER (why 6:30 AM CT): the VPS ResMan fetcher runs 5:15/5:50 AM CT and
@@ -29,15 +29,17 @@
  *   FFL_CFA_AGENT_ID    — agent_019VLn9nhFmWrDNsasKfChMq (FFL CFA Daily Numbers)
  *   FFL_ENVIRONMENT_ID  — ffl-agents (shared)
  *   FFL_VAULT_ID        — ffl-mcp (shared)
- *   CRON_SECRET         — gates this endpoint + authes the heartbeat (shared)
+ *   CRON_SECRET         — gates this endpoint (shared)
  *   FFL_CFA_PROMPT      — optional; overrides the default kickoff message
- *   AGENT_OS_BASE_URL   — optional; ffl-crm base for the heartbeat (default https://crm.vestlaunch.com)
+ *   FFL_WORKFORCE_API_KEY    — ffl-crm API key (ffl_live_...) with agent:write; reports run-status
+ *   AGENT_OS_BASE_URL   — optional; ffl-crm base for the run-status report (default https://crm.vestlaunch.com)
  *
  * ⚠️ ROUTING RULE: this file does NOT auto-route. It is imported + routed in
  * server.ts AND listed in /health (done in the same PR that added this file).
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { logAgentRun } from "../workforce-hub";
 
 export const config = { maxDuration: 60 };
 
@@ -64,40 +66,6 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-function heartbeatBaseUrl(): string {
-  const explicit = (process.env.AGENT_OS_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (explicit) return explicit;
-  const vest = (process.env.VESTLAUNCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (vest) return vest;
-  return "https://crm.vestlaunch.com";
-}
-
-/** Best-effort heartbeat into the AI Operating System logbook. NEVER throws. */
-async function postHeartbeat(input: { status: string; summary: string; needsHuman?: boolean }): Promise<void> {
-  const token = (process.env.CRON_SECRET ?? "").trim();
-  if (!token) return;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    await fetch(`${heartbeatBaseUrl()}/api/agent-os/heartbeat`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        agentKey: AGENT_KEY,
-        status: input.status,
-        summary: input.summary,
-        needsHuman: input.needsHuman ?? false,
-        tier: "green",
-      }),
-      signal: controller.signal,
-    });
-  } catch {
-    // swallow — heartbeat is best-effort
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
@@ -122,7 +90,7 @@ export default async function handler(
     .filter(([, v]) => !v)
     .map(([k]) => k);
   if (missing.length > 0) {
-    await postHeartbeat({ status: "error", summary: `cranbrook-cfa: missing env ${missing.join(", ")}`, needsHuman: true });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `cranbrook-cfa: missing env ${missing.join(", ")}`, needsHuman: true });
     json(res, 500, { ok: false, error: `Missing env: ${missing.join(", ")}` });
     return;
   }
@@ -156,7 +124,7 @@ export default async function handler(
     });
     const createText = await createRes.text();
     if (!createRes.ok) {
-      await postHeartbeat({ status: "error", summary: `cranbrook-cfa: create_session failed (HTTP ${createRes.status})`, needsHuman: true });
+      await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `cranbrook-cfa: create_session failed (HTTP ${createRes.status})`, needsHuman: true });
       json(res, 502, {
         ok: false,
         stage: "create_session",
@@ -168,7 +136,7 @@ export default async function handler(
     const session = JSON.parse(createText) as { id?: string };
     const sessionId = session.id;
     if (!sessionId) {
-      await postHeartbeat({ status: "error", summary: "cranbrook-cfa: create_session returned no id", needsHuman: true });
+      await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: "cranbrook-cfa: create_session returned no id", needsHuman: true });
       json(res, 502, { ok: false, stage: "create_session", error: "no session id", body: createText.slice(0, 1000) });
       return;
     }
@@ -182,7 +150,7 @@ export default async function handler(
     });
     const eventText = await eventRes.text();
     if (!eventRes.ok) {
-      await postHeartbeat({ status: "error", summary: `cranbrook-cfa: send_event failed (HTTP ${eventRes.status})`, needsHuman: true });
+      await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `cranbrook-cfa: send_event failed (HTTP ${eventRes.status})`, needsHuman: true });
       json(res, 502, {
         ok: false,
         stage: "send_event",
@@ -193,11 +161,11 @@ export default async function handler(
       return;
     }
 
-    await postHeartbeat({ status: "ok", summary: `cranbrook-cfa agent triggered for ${today} (session ${sessionId})` });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "ok", summary: `cranbrook-cfa agent triggered for ${today} (session ${sessionId})` });
     json(res, 200, { ok: true, session_id: sessionId, date: today, triggered_at: new Date().toISOString() });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await postHeartbeat({ status: "error", summary: `cranbrook-cfa: ${msg}`, needsHuman: true });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `cranbrook-cfa: ${msg}`, needsHuman: true });
     json(res, 500, { ok: false, error: msg });
   }
 }

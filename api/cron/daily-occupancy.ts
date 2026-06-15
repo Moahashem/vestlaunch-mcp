@@ -10,7 +10,7 @@
  * (no laptop) and writes FFL occupancy (B4/F4/G4) into the Company Numbers sheet.
  *
  * AI OPERATING SYSTEM: after kicking off, this cron posts a best-effort
- * Heartbeat to ffl-crm /api/agent-os/heartbeat (agentKey 'occupancy') so the
+ * run-status report to ffl-crm /api/v1/agent/run-status (agentKey 'occupancy') so the
  * Operating System dashboard + Ruckus can see the morning pipeline fired. The
  * heartbeat is best-effort: a failure to report NEVER affects the actual run.
  *
@@ -33,12 +33,14 @@
  *   FFL_OCCUPANCY_AGENT_ID   — agent_015XERb8X96E2JiXpKrWrdEn (the occupancy agent)
  *   FFL_ENVIRONMENT_ID       — env_01JaER…hnr6GA  (ffl-agents, shared)
  *   FFL_VAULT_ID             — vlt_011CbdGFbUSSxVsDm7Mymq77  (ffl-mcp, shared)
- *   CRON_SECRET              — random string; gates this endpoint + authes the heartbeat (shared)
+ *   CRON_SECRET              — random string; gates this endpoint (shared)
  *   FFL_OCCUPANCY_PROMPT     — optional; overrides the default kickoff message
- *   AGENT_OS_BASE_URL        — optional; ffl-crm base for the heartbeat (default https://crm.vestlaunch.com)
+ *   FFL_WORKFORCE_API_KEY    — ffl-crm API key (ffl_live_...) with agent:write; reports run-status
+ *   AGENT_OS_BASE_URL        — optional; ffl-crm base for the run-status report (default https://crm.vestlaunch.com)
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { logAgentRun } from "../workforce-hub";
 
 export const config = { maxDuration: 60 };
 
@@ -62,43 +64,6 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(body));
-}
-
-function heartbeatBaseUrl(): string {
-  const explicit = (process.env.AGENT_OS_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (explicit) return explicit;
-  const vest = (process.env.VESTLAUNCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (vest) return vest;
-  return "https://crm.vestlaunch.com";
-}
-
-/**
- * Best-effort heartbeat into the AI Operating System logbook. NEVER throws — a
- * reporting failure must not affect the occupancy run.
- */
-async function postHeartbeat(input: { status: string; summary: string; needsHuman?: boolean }): Promise<void> {
-  const token = (process.env.CRON_SECRET ?? "").trim();
-  if (!token) return;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    await fetch(`${heartbeatBaseUrl()}/api/agent-os/heartbeat`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        agentKey: AGENT_KEY,
-        status: input.status,
-        summary: input.summary,
-        needsHuman: input.needsHuman ?? false,
-        tier: "green",
-      }),
-      signal: controller.signal,
-    });
-  } catch {
-    // swallow — heartbeat is best-effort
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export default async function handler(
@@ -126,7 +91,7 @@ export default async function handler(
     .filter(([, v]) => !v)
     .map(([k]) => k);
   if (missing.length > 0) {
-    await postHeartbeat({ status: "error", summary: `occupancy: missing env ${missing.join(", ")}`, needsHuman: true });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `occupancy: missing env ${missing.join(", ")}`, needsHuman: true });
     json(res, 500, { ok: false, error: `Missing env: ${missing.join(", ")}` });
     return;
   }
@@ -161,7 +126,7 @@ export default async function handler(
     });
     const createText = await createRes.text();
     if (!createRes.ok) {
-      await postHeartbeat({ status: "error", summary: `occupancy: create_session failed (HTTP ${createRes.status})`, needsHuman: true });
+      await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `occupancy: create_session failed (HTTP ${createRes.status})`, needsHuman: true });
       json(res, 502, {
         ok: false,
         stage: "create_session",
@@ -173,7 +138,7 @@ export default async function handler(
     const session = JSON.parse(createText) as { id?: string };
     const sessionId = session.id;
     if (!sessionId) {
-      await postHeartbeat({ status: "error", summary: "occupancy: create_session returned no id", needsHuman: true });
+      await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: "occupancy: create_session returned no id", needsHuman: true });
       json(res, 502, { ok: false, stage: "create_session", error: "no session id", body: createText.slice(0, 1000) });
       return;
     }
@@ -188,7 +153,7 @@ export default async function handler(
     });
     const eventText = await eventRes.text();
     if (!eventRes.ok) {
-      await postHeartbeat({ status: "error", summary: `occupancy: send_event failed (HTTP ${eventRes.status})`, needsHuman: true });
+      await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `occupancy: send_event failed (HTTP ${eventRes.status})`, needsHuman: true });
       json(res, 502, {
         ok: false,
         stage: "send_event",
@@ -199,11 +164,11 @@ export default async function handler(
       return;
     }
 
-    await postHeartbeat({ status: "ok", summary: `occupancy agent triggered for ${today} (session ${sessionId})` });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "ok", summary: `occupancy agent triggered for ${today} (session ${sessionId})` });
     json(res, 200, { ok: true, session_id: sessionId, date: today, triggered_at: new Date().toISOString() });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await postHeartbeat({ status: "error", summary: `occupancy: ${msg}`, needsHuman: true });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `occupancy: ${msg}`, needsHuman: true });
     json(res, 500, { ok: false, error: msg });
   }
 }

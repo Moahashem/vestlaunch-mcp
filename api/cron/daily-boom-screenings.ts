@@ -6,21 +6,21 @@
  * AppFolio-derived count. Counting from Boom by SUBMITTED date means the monthly
  * total stays correct even after an application is approved/declined and leaves the
  * screening stage — the LeadSimple stage is a transient snapshot; Boom keeps the
- * full history. (See company-hq: Boom direct-API pull decision.)
+ * full history.
  *
  * Deterministic (no LLM): authenticate → page through /applications → bucket by
  * Central-Time submitted month → upsert one snapshot. Best-effort run-status.
  *
- * Auth is robust to BOTH Boom key formats:
- *   (a) access key + secret key  → POST /partner/v1/authenticate → bearer token
- *   (b) a ready "JWT secret"      → used directly as the bearer token
- * It tries (a) first; if that fails or returns no token, it falls back to (b).
+ * Auth is robust to BOTH Boom key formats (it tries each on /applications and
+ * uses whichever Boom accepts):
+ *   (a) access key + secret key → POST /partner/v1/authenticate → bearer token
+ *   (b) the "JWT secret" used directly as the bearer token
  *
  * Secrets (ALL placed by Mo in Vercel env — never hard-coded):
  *   BOOM_ACCESS_KEY   — Boom Partner API access key (the "VestLaunch Company Numbers" key)
  *   BOOM_SECRET_KEY   — its secret (the "JWT secret")
- *   BOOM_API_BASE     — optional; default https://api.boompay.app
- *                       (sandbox: https://api.sandbox.boompay.app)
+ *   BOOM_API_BASE     — optional; default https://api.sandbox.boompay.app
+ *                       (this is Boom's documented API host; the KEY decides live vs sandbox mode)
  *   FFL_WORKFORCE_API_KEY / VESTLAUNCH_API_KEY — ffl-crm key (agent:write) to write the snapshot
  *   VESTLAUNCH_BASE_URL — ffl-crm base, no trailing slash (default https://crm.vestlaunch.com)
  *   CRON_SECRET        — random string; gates this endpoint (shared)
@@ -43,7 +43,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 }
 
 function boomBase(): string {
-  return (process.env.BOOM_API_BASE ?? "https://api.boompay.app").trim().replace(/\/+$/, "");
+  return (process.env.BOOM_API_BASE ?? "https://api.sandbox.boompay.app").trim().replace(/\/+$/, "");
 }
 function hubBase(): string {
   return (
@@ -120,37 +120,51 @@ interface AuthResp {
   data?: { token?: string; api_token?: string; access_token?: string };
 }
 
-// Obtain a bearer token. Tries the access+secret → /authenticate exchange; if that
-// fails or yields no token, falls back to using the secret directly as the token
-// (Boom issues some keys as a ready JWT). Returns null only if both paths are empty.
-async function getBearer(base: string, accessKey: string, secretKey: string): Promise<string | null> {
-  try {
-    const authRes = await fetch(`${base}/partner/v1/authenticate`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ access_key: accessKey, secret_key: secretKey }),
-    });
-    if (authRes.ok) {
-      const authText = await authRes.text();
-      try {
-        const auth = JSON.parse(authText) as AuthResp;
-        const token =
-          auth.token ??
-          auth.api_token ??
-          auth.access_token ??
-          auth.data?.token ??
-          auth.data?.api_token ??
-          auth.data?.access_token;
-        if (token) return token;
-      } catch {
-        /* fall through to direct-token fallback */
+interface TokenCandidate {
+  mode: string;
+  token: string;
+}
+
+// Build the list of bearer tokens to try, in order: the exchanged token from
+// /authenticate (if any), then the raw secret used directly as a JWT bearer.
+// Also returns a short diag string describing the authenticate attempt.
+async function buildCandidates(
+  base: string,
+  accessKey: string,
+  secretKey: string,
+): Promise<{ candidates: TokenCandidate[]; authDiag: string }> {
+  const candidates: TokenCandidate[] = [];
+  let authDiag = "authenticate not-attempted";
+  if (accessKey) {
+    try {
+      const r = await fetch(`${base}/partner/v1/authenticate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ access_key: accessKey, secret_key: secretKey }),
+      });
+      authDiag = `authenticate HTTP ${r.status}`;
+      if (r.ok) {
+        const txt = await r.text();
+        try {
+          const j = JSON.parse(txt) as AuthResp;
+          const t =
+            j.token ?? j.api_token ?? j.access_token ?? j.data?.token ?? j.data?.api_token ?? j.data?.access_token;
+          if (t) {
+            candidates.push({ mode: "exchanged", token: t });
+            authDiag += " token-ok";
+          } else {
+            authDiag += " no-token-field";
+          }
+        } catch {
+          authDiag += " unparseable";
+        }
       }
+    } catch {
+      authDiag = "authenticate net-error";
     }
-  } catch {
-    /* network error → fall through to direct-token fallback */
   }
-  // Fallback: the secret itself is a ready bearer JWT.
-  return secretKey || null;
+  if (secretKey) candidates.push({ mode: "direct-secret", token: secretKey });
+  return { candidates, authDiag };
 }
 
 export default async function handler(
@@ -178,49 +192,67 @@ export default async function handler(
   }
 
   const base = boomBase();
+  const listUrl = (page: number) =>
+    `${base}/partner/v1/applications?page=${page}&per_page=100`;
+
   try {
-    // --- 1. Get a bearer token (access+secret exchange, or direct JWT) ---
-    const token = await getBearer(base, accessKey, secretKey);
-    if (!token) {
-      await logAgentRun({
-        agentKey: AGENT_KEY,
-        status: "failed",
-        summary: "boom-screenings: could not obtain a bearer token",
-        needsHuman: true,
+    // --- 1. Resolve a working bearer token by trying each candidate on page 1 ---
+    const { candidates, authDiag } = await buildCandidates(base, accessKey, secretKey);
+    let workingToken: string | null = null;
+    let workingMode = "";
+    let firstPageText = "";
+    const tried: string[] = [];
+    for (const c of candidates) {
+      const r = await fetch(listUrl(1), {
+        headers: { Authorization: `Bearer ${c.token}`, "content-type": "application/json" },
       });
-      json(res, 502, { ok: false, stage: "authenticate", error: "no token" });
+      tried.push(`${c.mode}:${r.status}`);
+      if (r.ok) {
+        workingToken = c.token;
+        workingMode = c.mode;
+        firstPageText = await r.text();
+        break;
+      }
+    }
+    if (!workingToken) {
+      const summary = `boom-screenings: applications auth rejected — ${authDiag}; list tried [${tried.join(", ")}]`;
+      await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary, needsHuman: true });
+      json(res, 502, { ok: false, stage: "auth", authDiag, tried });
       return;
     }
 
-    // --- 2. Page through applications ---
+    // --- 2. Page through applications (page 1 already fetched) ---
     const apps: Record<string, unknown>[] = [];
     const perPage = 100;
-    const MAX_PAGES = 50;
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const url = `${base}/partner/v1/applications?page=${page}&per_page=${perPage}`;
-      const r = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
-      });
-      const t = await r.text();
-      if (!r.ok) {
-        await logAgentRun({
-          agentKey: AGENT_KEY,
-          status: "failed",
-          summary: `boom-screenings: list applications failed p${page} (HTTP ${r.status})`,
-          needsHuman: true,
-        });
-        json(res, 502, { ok: false, stage: "list", page, status: r.status, body: t.slice(0, 500) });
-        return;
-      }
+    {
       let parsed: unknown = null;
       try {
-        parsed = JSON.parse(t);
+        parsed = JSON.parse(firstPageText);
       } catch {
-        /* leave parsed null → empty batch */
+        /* */
       }
       const batch = extractList(parsed);
       apps.push(...batch);
-      if (batch.length < perPage) break;
+      let page = 2;
+      const MAX_PAGES = 50;
+      let lastLen = batch.length;
+      while (lastLen >= perPage && page <= MAX_PAGES) {
+        const r = await fetch(listUrl(page), {
+          headers: { Authorization: `Bearer ${workingToken}`, "content-type": "application/json" },
+        });
+        if (!r.ok) break;
+        const t = await r.text();
+        let p: unknown = null;
+        try {
+          p = JSON.parse(t);
+        } catch {
+          /* */
+        }
+        const b = extractList(p);
+        apps.push(...b);
+        lastLen = b.length;
+        page++;
+      }
     }
 
     // --- 3. Bucket by Central-Time submitted month ---
@@ -233,14 +265,14 @@ export default async function handler(
     let pendingThis = 0;
     for (const app of apps) {
       const sd = submittedDate(app);
-      if (!sd) continue; // not yet submitted → not an application
+      if (!sd) continue;
       const ym = ctYearMonth(sd);
       if (ym === thisYM) {
         submittedThis++;
         const st = statusOf(app);
         if (st.includes("approv")) approvedThis++;
         else if (st.includes("declin") || st.includes("reject") || st.includes("denied")) declinedThis++;
-        else pendingThis++; // submitted / on-hold / conditional / canceled, etc.
+        else pendingThis++;
       } else if (ym === lastYM) {
         submittedLast++;
       }
@@ -275,7 +307,7 @@ export default async function handler(
     const summary =
       `boom-screenings: ${submittedThis} submitted this month ` +
       `(${approvedThis} appr / ${declinedThis} decl / ${pendingThis} pending), ` +
-      `${submittedLast} last month — from ${apps.length} apps`;
+      `${submittedLast} last month — from ${apps.length} apps [auth ${workingMode}]`;
     await logAgentRun({
       agentKey: AGENT_KEY,
       status: snapshotOk ? "ok" : "partial",
@@ -284,6 +316,7 @@ export default async function handler(
     });
     json(res, 200, {
       ok: true,
+      auth_mode: workingMode,
       counts: { submittedThis, submittedLast, approvedThis, declinedThis, pendingThis },
       total_apps: apps.length,
       snapshot_written: snapshotOk,

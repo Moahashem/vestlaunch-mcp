@@ -11,9 +11,14 @@
  * Deterministic (no LLM): authenticate → page through /applications → bucket by
  * Central-Time submitted month → upsert one snapshot. Best-effort run-status.
  *
+ * Auth is robust to BOTH Boom key formats:
+ *   (a) access key + secret key  → POST /partner/v1/authenticate → bearer token
+ *   (b) a ready "JWT secret"      → used directly as the bearer token
+ * It tries (a) first; if that fails or returns no token, it falls back to (b).
+ *
  * Secrets (ALL placed by Mo in Vercel env — never hard-coded):
  *   BOOM_ACCESS_KEY   — Boom Partner API access key (the "VestLaunch Company Numbers" key)
- *   BOOM_SECRET_KEY   — its secret key
+ *   BOOM_SECRET_KEY   — its secret (the "JWT secret")
  *   BOOM_API_BASE     — optional; default https://api.boompay.app
  *                       (sandbox: https://api.sandbox.boompay.app)
  *   FFL_WORKFORCE_API_KEY / VESTLAUNCH_API_KEY — ffl-crm key (agent:write) to write the snapshot
@@ -115,6 +120,39 @@ interface AuthResp {
   data?: { token?: string; api_token?: string; access_token?: string };
 }
 
+// Obtain a bearer token. Tries the access+secret → /authenticate exchange; if that
+// fails or yields no token, falls back to using the secret directly as the token
+// (Boom issues some keys as a ready JWT). Returns null only if both paths are empty.
+async function getBearer(base: string, accessKey: string, secretKey: string): Promise<string | null> {
+  try {
+    const authRes = await fetch(`${base}/partner/v1/authenticate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ access_key: accessKey, secret_key: secretKey }),
+    });
+    if (authRes.ok) {
+      const authText = await authRes.text();
+      try {
+        const auth = JSON.parse(authText) as AuthResp;
+        const token =
+          auth.token ??
+          auth.api_token ??
+          auth.access_token ??
+          auth.data?.token ??
+          auth.data?.api_token ??
+          auth.data?.access_token;
+        if (token) return token;
+      } catch {
+        /* fall through to direct-token fallback */
+      }
+    }
+  } catch {
+    /* network error → fall through to direct-token fallback */
+  }
+  // Fallback: the secret itself is a ready bearer JWT.
+  return secretKey || null;
+}
+
 export default async function handler(
   req: IncomingMessage,
   res: ServerResponse,
@@ -128,63 +166,29 @@ export default async function handler(
 
   const accessKey = (process.env.BOOM_ACCESS_KEY ?? "").trim();
   const secretKey = (process.env.BOOM_SECRET_KEY ?? "").trim();
-  const missing = [
-    ["BOOM_ACCESS_KEY", accessKey],
-    ["BOOM_SECRET_KEY", secretKey],
-  ]
-    .filter(([, v]) => !v)
-    .map(([k]) => k);
-  if (missing.length > 0) {
+  if (!secretKey) {
     await logAgentRun({
       agentKey: AGENT_KEY,
       status: "failed",
-      summary: `boom-screenings: missing env ${missing.join(", ")}`,
+      summary: "boom-screenings: missing env BOOM_SECRET_KEY",
       needsHuman: true,
     });
-    json(res, 500, { ok: false, error: `Missing env: ${missing.join(", ")}` });
+    json(res, 500, { ok: false, error: "Missing env: BOOM_SECRET_KEY" });
     return;
   }
 
   const base = boomBase();
   try {
-    // --- 1. Authenticate → Bearer token ---
-    const authRes = await fetch(`${base}/partner/v1/authenticate`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ access_key: accessKey, secret_key: secretKey }),
-    });
-    const authText = await authRes.text();
-    if (!authRes.ok) {
-      await logAgentRun({
-        agentKey: AGENT_KEY,
-        status: "failed",
-        summary: `boom-screenings: authenticate failed (HTTP ${authRes.status})`,
-        needsHuman: true,
-      });
-      json(res, 502, { ok: false, stage: "authenticate", status: authRes.status, body: authText.slice(0, 500) });
-      return;
-    }
-    let auth: AuthResp = {};
-    try {
-      auth = JSON.parse(authText) as AuthResp;
-    } catch {
-      /* fall through to no-token check */
-    }
-    const token =
-      auth.token ??
-      auth.api_token ??
-      auth.access_token ??
-      auth.data?.token ??
-      auth.data?.api_token ??
-      auth.data?.access_token;
+    // --- 1. Get a bearer token (access+secret exchange, or direct JWT) ---
+    const token = await getBearer(base, accessKey, secretKey);
     if (!token) {
       await logAgentRun({
         agentKey: AGENT_KEY,
         status: "failed",
-        summary: "boom-screenings: no token in auth response",
+        summary: "boom-screenings: could not obtain a bearer token",
         needsHuman: true,
       });
-      json(res, 502, { ok: false, stage: "authenticate", error: "no token", body: authText.slice(0, 500) });
+      json(res, 502, { ok: false, stage: "authenticate", error: "no token" });
       return;
     }
 

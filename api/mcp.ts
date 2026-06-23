@@ -734,6 +734,45 @@ async function getCfaNumbers(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/cfa-numbers" };
 }
 
+// --- SMART TOOL: get_cf_lead_numbers ---
+// Thin-agent / smart-tools (D13). Returns the Cranbrook "CF Leasing Leads" (LeadSimple)
+// lead counts for the Company Numbers "CFA Leasing -> Leads" row (B35:E35). LeadSimple has
+// NO counting API: a fetcher on the FFL VPS logs in headlessly each morning, reads the
+// server-computed Count per window, and pushes the numbers to ffl-crm; this reads
+// /api/v1/analytics/cf-lead-numbers - no fallback. READ-ONLY.
+const CF_LEADS_TOOL_NAME = "get_cf_lead_numbers";
+const CF_LEADS_TOOL_DESC =
+  "Smart server-side relay: returns the Cranbrook 'CF Leasing Leads' (LeadSimple) lead counts " +
+  "for the Company Numbers 'CFA Leasing -> Leads' row - this_week (B35, Sunday-start), this_month " +
+  "(C35), last_month (D35), new_30d (E35 = in 'New' stage created last 30 days). Definition: leads " +
+  "CREATED in window, all sources, excluding the 'Doesn't Qualify' stage. Data comes from the " +
+  "pre-dawn VPS LeadSimple fetcher via ffl-crm. CRITICAL: response includes `stale` - when " +
+  "stale=true the data is NOT from today (America/Chicago) and the agent MUST NOT write any cell " +
+  "(write nothing + flag). Returns { cells, stale, ct_date, today_ct, fetched_at_ct, definition }. " +
+  "Source = /api/v1/analytics/cf-lead-numbers. No arguments. Read-only.";
+const CF_LEADS_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getCfLeadNumbers(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/cf-lead-numbers");
+  if (!resp.success) {
+    throw new Error(
+      `cf-lead-numbers endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/cf-lead-numbers (ffl-crm) to be deployed, the Bearer " +
+        "key to have scope properties:read (or *), and the VPS LeadSimple fetcher to have pushed at " +
+        "least once (check /opt/ffl-resman-fetcher/last-run-leadsimple.json on the VPS).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).stale !== "boolean") {
+    throw new Error("cf-lead-numbers endpoint returned an unexpected shape (no boolean stale flag).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/cf-lead-numbers" };
+}
+
 // --- SMART TOOL: get_ffl_sales_signups ---
 // Thin-agent / smart-tools (D13). Returns FFL "Sales - Sign Ups" metrics (Company
 // Numbers row 29, B29-E29) computed server-side. LOCKED with Mo 2026-06-10: a Sign Up
@@ -888,6 +927,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
+  const includeCfLeadsTool = !toolFilter || toolFilter.has(CF_LEADS_TOOL_NAME);
   const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
   const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
@@ -920,6 +960,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
   ...(includeCfaTool
         ? [{ name: CFA_TOOL_NAME, description: CFA_TOOL_DESC, inputSchema: CFA_TOOL_SCHEMA }]
+        : []),
+      ...(includeCfLeadsTool
+        ? [{ name: CF_LEADS_TOOL_NAME, description: CF_LEADS_TOOL_DESC, inputSchema: CF_LEADS_TOOL_SCHEMA }]
         : []),
       ...(includeSignupsTool
         ? [{ name: FFL_SIGNUPS_TOOL_NAME, description: FFL_SIGNUPS_TOOL_DESC, inputSchema: FFL_SIGNUPS_TOOL_SCHEMA }]
@@ -1066,6 +1109,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${CFA_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === CF_LEADS_TOOL_NAME) {
+      if (!includeCfLeadsTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getCfLeadNumbers(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${CF_LEADS_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

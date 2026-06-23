@@ -22,6 +22,9 @@
     { "path": "/api/cron/daily-cfa", "schedule": "30 11 * * *" },
     { "path": "/api/cron/daily-cfa", "schedule": "50 11 * * *" },
     { "path": "/api/cron/daily-cfa", "schedule": "10 12 * * *" },
+    { "path": "/api/cron/daily-cf-leads", "schedule": "40 11 * * *" },
+    { "path": "/api/cron/daily-cf-leads", "schedule": "0 12 * * *" },
+    { "path": "/api/cron/daily-cf-leads", "schedule": "20 12 * * *" },
     { "path": "/api/cron/daily-boom-screenings", "schedule": "5 13 * * *" },
     { "path": "/api/cron/daily-boom-screenings", "schedule": "5 14 * * *" }
   ]

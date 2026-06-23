@@ -35,6 +35,7 @@ import cronHandler from "./api/cron/daily-lead-count";
 import occupancyCronHandler from "./api/cron/daily-occupancy";
 import showmojoCronHandler from "./api/cron/daily-showmojo";
 import cfaCronHandler from "./api/cron/daily-cfa";
+import cfLeadsCronHandler from "./api/cron/daily-cf-leads";
 import boomScreeningsCronHandler from "./api/cron/daily-boom-screenings";
 
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -70,6 +71,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await cfaCronHandler(req, res);
       return;
     }
+    if (path === "/api/cron/daily-cf-leads") {
+      await cfLeadsCronHandler(req, res);
+      return;
+    }
     if (path === "/api/cron/daily-boom-screenings") {
       await boomScreeningsCronHandler(req, res);
       return;
@@ -88,6 +93,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/daily-occupancy",
             "/api/cron/daily-showmojo",
             "/api/cron/daily-cfa",
+            "/api/cron/daily-cf-leads",
             "/api/cron/daily-boom-screenings",
           ],
         }),

@@ -31,8 +31,9 @@
  *   FFL_VAULT_ID          — vlt_011CbdGFbUSSxVsDm7Mymq77  (ffl-mcp)
  *   CRON_SECRET           — random string; gates this endpoint
  *   FFL_DAILY_PROMPT      — optional; overrides the default kickoff message
- *                           (the tab-housekeeping addendum below is appended
- *                           to EITHER prompt, so it applies regardless)
+ *                           (the tab-placement + tab-housekeeping addenda
+ *                           below are appended to EITHER prompt, so they
+ *                           apply regardless)
  *   FFL_WORKFORCE_API_KEY    — ffl-crm API key (ffl_live_...) with agent:write; reports run-status
  *   AGENT_OS_BASE_URL     — optional; ffl-crm base for the run-status report (default https://crm.vestlaunch.com)
  */
@@ -58,6 +59,27 @@ const DEFAULT_PROMPT = [
   "after each, clear-on-error, never row 28. This fire may be a RETRY — that",
   "is normal; A54 makes it idempotent. Read back what you wrote and report",
   "which items were filled, skipped (already done), or failed.",
+].join(" ");
+
+/**
+ * Tab placement (Mo, 2026-07-06): starting 7/3 the day's tab drifted to the
+ * FAR LEFT of the tab strip because Google's duplicateSheet inserts the copy
+ * at index 0 when insertSheetIndex is omitted. Tabs must stay in
+ * chronological order with today's tab rightmost. Appended to the kickoff
+ * prompt (env-override or default) so it always applies.
+ */
+const TAB_PLACEMENT_ADDENDUM = [
+  "TAB PLACEMENT RULE (Mo, 2026-07-06): whenever you CREATE the day's tab, it",
+  "MUST end up at the FAR RIGHT of the tab strip (rightmost position), keeping",
+  "all date tabs in chronological order. Google's duplicateSheet inserts the",
+  "copy at the FAR LEFT (index 0) when insertSheetIndex is omitted — NEVER",
+  "rely on that default. Either pass insertSheetIndex equal to the CURRENT",
+  "TOTAL SHEET COUNT when duplicating, or, immediately after creating the tab,",
+  'send one batchUpdate with {"updateSheetProperties":{"properties":{"sheetId":<newTabId>,"index":<totalSheetCount>},"fields":"index"}}',
+  "to move it last (the Sheets API index quirk: moving a tab rightward",
+  "requires desired position + 1, so total sheet count lands it rightmost).",
+  "Then VERIFY the new tab is rightmost before writing any values; if it is",
+  "not, move it first. This rule applies every day, including retries.",
 ].join(" ");
 
 /**
@@ -108,7 +130,7 @@ export default async function handler(
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
   const basePrompt = process.env.FFL_DAILY_PROMPT?.trim() || DEFAULT_PROMPT;
-  const prompt = `${basePrompt}\n\n${HOUSEKEEPING_ADDENDUM}`;
+  const prompt = `${basePrompt}\n\n${TAB_PLACEMENT_ADDENDUM}\n\n${HOUSEKEEPING_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

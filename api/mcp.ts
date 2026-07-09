@@ -34,8 +34,18 @@
  * VESTLAUNCH_WRITE_ALLOWLIST (comma-separated tool names) restricts writes to
  * exactly those tools — least privilege for any future "acting" agent.
  *
- * Auth: a single static Bearer token (MCP_BEARER_TOKEN), injected by the
- * Managed Agents credential vault on connect.
+ * Auth (two modes, decided by the Bearer token each request carries):
+ *   1. PER-USER CRM API KEY (preferred): connect with your own CRM key
+ *      (`ffl_live_...`, minted in CRM Settings -> API Keys) as the Bearer
+ *      token. The key is proxied straight to the CRM, which validates it and
+ *      returns ONLY the tools its scopes allow — revoke the key in the CRM
+ *      and MCP access dies instantly. Writes are governed by the key's
+ *      scopes (server-side), so VESTLAUNCH_ENABLE_WRITES does not apply;
+ *      DELETE-method tools are still NEVER exposed.
+ *   2. LEGACY shared token (MCP_BEARER_TOKEN): behaves exactly as before —
+ *      uses the env VESTLAUNCH_API_KEY, writes gated by
+ *      VESTLAUNCH_ENABLE_WRITES + VESTLAUNCH_WRITE_ALLOWLIST. Kept for
+ *      existing agents; migrate them to per-user keys over time.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -49,6 +59,9 @@ import {
 
 export const config = { maxDuration: 60 };
 
+/** CRM API keys minted in Settings -> API Keys always start with this. */
+const CRM_KEY_PREFIX = "ffl_live_";
+
 // ───────────────────────── config ─────────────────────────
 type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
 
@@ -60,12 +73,22 @@ interface Cfg {
   writeAllowlist: Set<string> | null;
 }
 
-function loadCfg(): Cfg {
+function loadCfg(perUserApiKey?: string): Cfg {
   const baseUrl = (process.env.VESTLAUNCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  const apiKey = (process.env.VESTLAUNCH_API_KEY ?? "").trim();
   if (!baseUrl) throw new Error("Missing env: VESTLAUNCH_BASE_URL");
-  if (!apiKey) throw new Error("Missing env: VESTLAUNCH_API_KEY");
   const t = Number.parseInt(process.env.VESTLAUNCH_TIMEOUT_MS ?? "", 10);
+  const timeoutMs = Number.isFinite(t) && t > 0 ? t : 30_000;
+
+  if (perUserApiKey) {
+    // Per-user mode: the connecting user's own CRM key. The CRM enforces the
+    // key's scopes server-side (and the blast guardrail is server-enforced),
+    // so writes are allowed here and scoping comes from /api/v1/me.
+    return { baseUrl, apiKey: perUserApiKey, enableWrites: true, timeoutMs, writeAllowlist: null };
+  }
+
+  // Legacy mode: shared env key, writes gated by env flags (unchanged).
+  const apiKey = (process.env.VESTLAUNCH_API_KEY ?? "").trim();
+  if (!apiKey) throw new Error("Missing env: VESTLAUNCH_API_KEY");
   const allowRaw = (process.env.VESTLAUNCH_WRITE_ALLOWLIST ?? "").trim();
   const writeAllowlist = allowRaw
     ? new Set(allowRaw.split(",").map((s) => s.trim()).filter(Boolean))
@@ -74,7 +97,7 @@ function loadCfg(): Cfg {
     baseUrl,
     apiKey,
     enableWrites: (process.env.VESTLAUNCH_ENABLE_WRITES ?? "").trim().toLowerCase() === "true",
-    timeoutMs: Number.isFinite(t) && t > 0 ? t : 30_000,
+    timeoutMs,
     writeAllowlist,
   };
 }
@@ -893,7 +916,11 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
     "/api/v1/me",
   );
   if (!me.success) {
-    throw new Error(`Failed to load tool manifest from /api/v1/me (HTTP ${me.statusCode}): ${me.error}`);
+    const e = new Error(
+      `Failed to load tool manifest from /api/v1/me (HTTP ${me.statusCode}): ${me.error}`,
+    ) as Error & { statusCode?: number };
+    e.statusCode = me.statusCode;
+    throw e;
   }
   const data = me.data ?? {};
   const caps = Array.isArray(data.capabilities) ? data.capabilities : [];
@@ -1225,8 +1252,19 @@ export default async function handler(
   req: IncomingMessage & { body?: unknown },
   res: ServerResponse,
 ): Promise<void> {
-  const expected = process.env.MCP_BEARER_TOKEN;
-  if (!expected || req.headers["authorization"] !== `Bearer ${expected}`) {
+  const authHeader = req.headers["authorization"];
+  const bearer =
+    typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : "";
+  const legacyToken = (process.env.MCP_BEARER_TOKEN ?? "").trim();
+
+  let perUserApiKey: string | undefined;
+  if (legacyToken && bearer === legacyToken) {
+    perUserApiKey = undefined; // legacy shared-token mode (env VESTLAUNCH_API_KEY)
+  } else if (bearer.startsWith(CRM_KEY_PREFIX)) {
+    perUserApiKey = bearer; // per-user CRM key; validated by /api/v1/me below
+  } else {
     sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });
     return;
   }
@@ -1235,8 +1273,17 @@ export default async function handler(
 
   let server: Server;
   try {
-    server = await buildServer(loadCfg(), toolFilter);
+    server = await buildServer(loadCfg(perUserApiKey), toolFilter);
   } catch (err) {
+    const status = (err as { statusCode?: number })?.statusCode;
+    if (perUserApiKey && (status === 401 || status === 403)) {
+      sendJson(res, 401, {
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Invalid or revoked API key" },
+        id: null,
+      });
+      return;
+    }
     sendJson(res, 500, {
       jsonrpc: "2.0",
       error: { code: -32002, message: `MCP server init failed: ${err instanceof Error ? err.message : String(err)}` },

@@ -63,6 +63,17 @@ claude mcp add vestlaunch -- env VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com 
 
 Spawn `npx -y vestlaunch-mcp` with `VESTLAUNCH_BASE_URL` and `VESTLAUNCH_API_KEY` in the environment. Stdio in, stdio out.
 
+#### Hosted (no install) — connect over HTTP with your own key
+
+The Vercel deployment exposes the same tools at `https://<your-app>.vercel.app/api/mcp` (Streamable HTTP). Connect with **your own CRM API key as the Bearer token** — no local install, no env vars:
+
+```
+URL:    https://<your-app>.vercel.app/api/mcp
+Auth:   Bearer ffl_live_...   (your key from Settings → API Keys)
+```
+
+You only see the tools your key's scopes allow; writes are governed by those scopes (DELETE is never exposed, and campaign blasts always require a test send + confirmation code, enforced by the CRM). Revoking the key in the CRM cuts off access instantly. A legacy shared `MCP_BEARER_TOKEN` is still accepted for previously configured agents and behaves as before (env `VESTLAUNCH_API_KEY`, writes off unless `VESTLAUNCH_ENABLE_WRITES=true`).
+
 ### 3. Try it
 
 In your agent, ask:

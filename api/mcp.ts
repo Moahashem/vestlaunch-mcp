@@ -34,18 +34,30 @@
  * VESTLAUNCH_WRITE_ALLOWLIST (comma-separated tool names) restricts writes to
  * exactly those tools — least privilege for any future "acting" agent.
  *
- * Auth (two modes, decided by the Bearer token each request carries):
- *   1. PER-USER CRM API KEY (preferred): connect with your own CRM key
- *      (`ffl_live_...`, minted in CRM Settings -> API Keys) as the Bearer
- *      token. The key is proxied straight to the CRM, which validates it and
- *      returns ONLY the tools its scopes allow — revoke the key in the CRM
- *      and MCP access dies instantly. Writes are governed by the key's
- *      scopes (server-side), so VESTLAUNCH_ENABLE_WRITES does not apply;
- *      DELETE-method tools are still NEVER exposed.
- *   2. LEGACY shared token (MCP_BEARER_TOKEN): behaves exactly as before —
+ * Auth (three modes, decided by the Bearer token each request carries):
+ *   1. SIGN-IN / OAuth (preferred for humans in Claude Desktop): the client has
+ *      no field to paste a key. It follows the OAuth 2.1 discovery handshake —
+ *      on a 401 it reads our `WWW-Authenticate: Bearer resource_metadata="…"`
+ *      header, fetches /.well-known/oauth-protected-resource, logs the person in
+ *      against WorkOS AuthKit, and returns with a real WorkOS access token. We
+ *      VERIFY that token against AuthKit's JWKS (jose), read the person's email,
+ *      then map it to their CRM `ffl_live_` key via MCP_USER_KEY_MAP. The CRM key
+ *      never leaves the server; each person acts as themselves in the CRM.
+ *   2. PER-USER CRM API KEY: connect with your own CRM key (`ffl_live_...`,
+ *      minted in CRM Settings -> API Keys) as the Bearer token. The key is
+ *      proxied straight to the CRM, which validates it and returns ONLY the
+ *      tools its scopes allow — revoke the key in the CRM and MCP access dies
+ *      instantly. Writes are governed by the key's scopes (server-side), so
+ *      VESTLAUNCH_ENABLE_WRITES does not apply; DELETE-method tools are still
+ *      NEVER exposed.
+ *   3. LEGACY shared token (MCP_BEARER_TOKEN): behaves exactly as before —
  *      uses the env VESTLAUNCH_API_KEY, writes gated by
  *      VESTLAUNCH_ENABLE_WRITES + VESTLAUNCH_WRITE_ALLOWLIST. Kept for
  *      existing agents; migrate them to per-user keys over time.
+ *
+ * The OAuth authorization server (login/consent/token issuance) is WorkOS
+ * AuthKit — we do NOT hand-build auth. This file is the OAuth *resource server*:
+ * it only verifies tokens and maps identity -> CRM key. See docs/OAUTH-SETUP.md.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -56,6 +68,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 export const config = { maxDuration: 60 };
 
@@ -1248,6 +1261,114 @@ function parseToolFilter(reqUrl: string | undefined): Set<string> | null {
   }
 }
 
+// ───────────────────────── OAuth (resource server) ─────────────────────────
+// This server VERIFIES WorkOS-issued access tokens; it never issues them.
+// WorkOS AuthKit is the authorization server (login/consent/tokens).
+
+/** AuthKit domain that runs login/consent and issues tokens, e.g. https://x.authkit.app */
+function authkitDomain(): string {
+  return (process.env.WORKOS_AUTHKIT_DOMAIN ?? "").trim().replace(/\/+$/, "");
+}
+
+/** Public URL of THIS resource, echoed to clients in the 401 challenge. */
+function resourceMetadataUrl(): string {
+  const explicit = (process.env.MCP_RESOURCE_URL ?? "").trim().replace(/\/+$/, "");
+  const base = explicit
+    ? explicit.replace(/\/api\/mcp$/, "")
+    : (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://vestlaunch-mcp.vercel.app");
+  return `${base}/.well-known/oauth-protected-resource`;
+}
+
+/**
+ * Send an RFC 6750 / RFC 9728 401 that points the client at our discovery doc.
+ * This is what makes Claude Desktop's "Connect" button start the login flow.
+ */
+function sendUnauthorized(res: ServerResponse, message = "Unauthorized"): void {
+  res.setHeader(
+    "www-authenticate",
+    `Bearer resource_metadata="${resourceMetadataUrl()}"`,
+  );
+  sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message }, id: null });
+}
+
+// Cache the AuthKit metadata document + its JWKS across warm invocations.
+type AsMetadata = { issuer: string; jwks_uri: string; userinfo_endpoint?: string };
+let asMetaCache: { at: number; meta: AsMetadata } | null = null;
+let jwksCache: { uri: string; jwks: ReturnType<typeof createRemoteJWKSet> } | null = null;
+const AS_META_TTL_MS = 60 * 60 * 1000; // 1h
+
+async function getAsMetadata(): Promise<AsMetadata> {
+  const domain = authkitDomain();
+  if (!domain) throw new Error("WORKOS_AUTHKIT_DOMAIN is not set");
+  if (asMetaCache && Date.now() - asMetaCache.at < AS_META_TTL_MS) return asMetaCache.meta;
+  const url = `${domain}/.well-known/oauth-authorization-server`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`AuthKit metadata fetch failed (${r.status})`);
+  const meta = (await r.json()) as AsMetadata;
+  if (!meta.issuer || !meta.jwks_uri) throw new Error("AuthKit metadata missing issuer/jwks_uri");
+  asMetaCache = { at: Date.now(), meta };
+  return meta;
+}
+
+function jwksFor(uri: string): ReturnType<typeof createRemoteJWKSet> {
+  if (jwksCache && jwksCache.uri === uri) return jwksCache.jwks;
+  const jwks = createRemoteJWKSet(new URL(uri));
+  jwksCache = { uri, jwks };
+  return jwks;
+}
+
+type Identity = { email?: string; sub?: string };
+
+/**
+ * Verify a WorkOS access token against AuthKit's JWKS and return the identity.
+ * Throws if the token is invalid/expired. NOTE: audience (`aud`) is intentionally
+ * not enforced for launch — safe here because we never forward this token to the
+ * CRM and always resolve identity -> our own CRM key. TODO: bind + check `aud`.
+ */
+async function verifyWorkosToken(token: string): Promise<Identity> {
+  const meta = await getAsMetadata();
+  const jwks = jwksFor(meta.jwks_uri);
+  const { payload } = await jwtVerify(token, jwks, { issuer: meta.issuer });
+  let email = typeof payload.email === "string" ? payload.email : undefined;
+  const sub = typeof payload.sub === "string" ? payload.sub : undefined;
+  // Some access tokens omit email; fall back to the userinfo endpoint.
+  if (!email && meta.userinfo_endpoint) {
+    try {
+      const r = await fetch(meta.userinfo_endpoint, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (r.ok) {
+        const info = (await r.json()) as { email?: unknown };
+        if (typeof info.email === "string") email = info.email;
+      }
+    } catch {
+      /* userinfo is best-effort; identity by sub still works if mapped */
+    }
+  }
+  return { email, sub };
+}
+
+/**
+ * Map a verified identity to that person's CRM key using MCP_USER_KEY_MAP
+ * (a one-line JSON object of loginEmail -> ffl_live_ key, with optional
+ * sub -> key entries). Returns undefined if the person isn't provisioned.
+ */
+function crmKeyForIdentity(id: Identity): string | undefined {
+  const raw = (process.env.MCP_USER_KEY_MAP ?? "").trim();
+  if (!raw) return undefined;
+  let map: Record<string, string>;
+  try {
+    map = JSON.parse(raw) as Record<string, string>;
+  } catch {
+    return undefined;
+  }
+  const byEmail = id.email
+    ? map[id.email] ?? map[id.email.toLowerCase()]
+    : undefined;
+  if (byEmail) return byEmail;
+  return id.sub ? map[id.sub] : undefined;
+}
+
 export default async function handler(
   req: IncomingMessage & { body?: unknown },
   res: ServerResponse,
@@ -1264,8 +1385,33 @@ export default async function handler(
     perUserApiKey = undefined; // legacy shared-token mode (env VESTLAUNCH_API_KEY)
   } else if (bearer.startsWith(CRM_KEY_PREFIX)) {
     perUserApiKey = bearer; // per-user CRM key; validated by /api/v1/me below
+  } else if (bearer && authkitDomain()) {
+    // Mode 1: a WorkOS access token from the sign-in flow. Verify -> map to key.
+    let identity: Identity;
+    try {
+      identity = await verifyWorkosToken(bearer);
+    } catch {
+      sendUnauthorized(res, "Invalid or expired sign-in token");
+      return;
+    }
+    const mapped = crmKeyForIdentity(identity);
+    if (!mapped) {
+      // Authenticated, but no CRM access provisioned for this person.
+      sendJson(res, 403, {
+        jsonrpc: "2.0",
+        error: {
+          code: -32003,
+          message:
+            "Signed in, but no CRM access is provisioned for your account yet. Ask the VestLaunch owner to add you.",
+        },
+        id: null,
+      });
+      return;
+    }
+    perUserApiKey = mapped;
   } else {
-    sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });
+    // No usable credential — challenge the client to start the sign-in flow.
+    sendUnauthorized(res);
     return;
   }
 

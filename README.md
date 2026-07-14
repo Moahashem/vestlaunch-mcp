@@ -63,16 +63,27 @@ claude mcp add vestlaunch -- env VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com 
 
 Spawn `npx -y vestlaunch-mcp` with `VESTLAUNCH_BASE_URL` and `VESTLAUNCH_API_KEY` in the environment. Stdio in, stdio out.
 
+#### Hosted (no install) — sign in from Claude Desktop / Cowork *(recommended)*
+
+Add the Vercel deployment as a **custom connector** and click **Connect**. A WorkOS login page opens, you sign in with your work email and approve access, and Claude gets its token automatically — nothing to copy or paste:
+
+```
+URL:    https://<your-app>.vercel.app/api/mcp
+Auth:   click "Connect" → sign in with WorkOS → Allow
+```
+
+Under the hood this is a standard OAuth 2.1 sign-in: WorkOS AuthKit runs the login and consent screen and issues the token, and this server verifies it and maps your signed-in email to your own CRM key. Owner setup (WorkOS account + Vercel env vars) is a one-time job documented in [`docs/OAUTH-SETUP.md`](docs/OAUTH-SETUP.md). If you sign in successfully but see "no CRM access is provisioned," ask the VestLaunch owner to add your email to the access list.
+
 #### Hosted (no install) — connect over HTTP with your own key
 
-The Vercel deployment exposes the same tools at `https://<your-app>.vercel.app/api/mcp` (Streamable HTTP). Connect with **your own CRM API key as the Bearer token** — no local install, no env vars:
+For agents/CLIs that *can* paste a token, connect to the same endpoint with **your own CRM API key as the Bearer token** — no local install, no env vars:
 
 ```
 URL:    https://<your-app>.vercel.app/api/mcp
 Auth:   Bearer ffl_live_...   (your key from Settings → API Keys)
 ```
 
-You only see the tools your key's scopes allow; writes are governed by those scopes (DELETE is never exposed, and campaign blasts always require a test send + confirmation code, enforced by the CRM). Revoking the key in the CRM cuts off access instantly. A legacy shared `MCP_BEARER_TOKEN` is still accepted for previously configured agents and behaves as before (env `VESTLAUNCH_API_KEY`, writes off unless `VESTLAUNCH_ENABLE_WRITES=true`).
+Either way you only see the tools your key's scopes allow; writes are governed by those scopes (DELETE is never exposed, and campaign blasts always require a test send + confirmation code, enforced by the CRM). Revoking the key in the CRM cuts off access instantly. A legacy shared `MCP_BEARER_TOKEN` is still accepted for previously configured agents and behaves as before (env `VESTLAUNCH_API_KEY`, writes off unless `VESTLAUNCH_ENABLE_WRITES=true`).
 
 ### 3. Try it
 
@@ -91,6 +102,18 @@ The agent will call `vestlaunch_list_opportunities`, `vestlaunch_get_pipelines`,
 | `VESTLAUNCH_ENABLE_WRITES` | ❌ | `false` | Set to `true` to register write tools (POST/PATCH/DELETE). Tools are still gated by the key's scopes — both must allow the write. |
 | `VESTLAUNCH_LOG_LEVEL` | ❌ | `info` | `silent` \| `error` \| `warn` \| `info` \| `debug`. Goes to stderr. |
 | `VESTLAUNCH_TIMEOUT_MS` | ❌ | `30000` | Per-request timeout. |
+
+### Hosted (Vercel) — sign-in mode
+
+Only needed for the OAuth "Connect and sign in" flow on the hosted endpoint. See [`docs/OAUTH-SETUP.md`](docs/OAUTH-SETUP.md) for the one-time owner setup.
+
+| Env var | Required | Default | Purpose |
+|---|---|---|---|
+| `WORKOS_AUTHKIT_DOMAIN` | for sign-in | — | AuthKit domain that runs login and issues tokens (e.g. `https://your-project.authkit.app`). Its presence is what turns sign-in mode on. |
+| `WORKOS_CLIENT_ID` | for sign-in | — | WorkOS Client ID (`client_...`). |
+| `WORKOS_API_KEY` | for sign-in | — | WorkOS API key (`sk_live_...`, shown once). |
+| `MCP_USER_KEY_MAP` | for sign-in | — | One line of JSON mapping each signed-in email (or WorkOS `sub`) to their CRM `ffl_live_` key. Add a teammate by appending one entry — no code change. |
+| `MCP_RESOURCE_URL` | ❌ | auto | Canonical public URL of this endpoint for OAuth discovery. Set only if auto-detection is wrong (e.g. custom domain); must end in `/api/mcp`. |
 
 ## Available tools
 

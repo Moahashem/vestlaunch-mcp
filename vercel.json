@@ -9,6 +9,22 @@
     {
       "source": "/.well-known/oauth-protected-resource/api/mcp",
       "destination": "/api/oauth-protected-resource"
+    },
+    {
+      "source": "/.well-known/oauth-authorization-server",
+      "destination": "/api/oauth-authorization-server"
+    },
+    {
+      "source": "/authorize",
+      "destination": "/api/authorize"
+    },
+    {
+      "source": "/token",
+      "destination": "/api/token"
+    },
+    {
+      "source": "/register",
+      "destination": "/api/oauth-register"
     }
   ],
   "crons": [

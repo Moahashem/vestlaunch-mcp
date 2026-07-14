@@ -38,6 +38,16 @@ import cfaCronHandler from "./api/cron/daily-cfa";
 import cfLeadsCronHandler from "./api/cron/daily-cf-leads";
 import boomScreeningsCronHandler from "./api/cron/daily-boom-screenings";
 
+// Self-hosted OAuth 2.1 authorization server (for Claude Desktop's
+// custom-connector "Connect" button). These MUST be routed here because this
+// BYO Node server ignores vercel.json rewrites — every request arrives with
+// its original path and is dispatched by the explicit table below.
+import oauthProtectedResourceHandler from "./api/oauth-protected-resource";
+import oauthAuthorizationServerHandler from "./api/oauth-authorization-server";
+import authorizeHandler from "./api/authorize";
+import tokenHandler from "./api/token";
+import oauthRegisterHandler from "./api/oauth-register";
+
 const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -79,6 +89,43 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await boomScreeningsCronHandler(req, res);
       return;
     }
+    // ── Self-hosted OAuth 2.1 endpoints ──
+    // Protected-resource metadata (RFC 9728). Clients may request the bare
+    // well-known path OR the resource-suffixed variant
+    // (/.well-known/oauth-protected-resource/api/mcp), so match on prefix.
+    if (
+      path === "/.well-known/oauth-protected-resource" ||
+      path.startsWith("/.well-known/oauth-protected-resource/") ||
+      path === "/api/oauth-protected-resource"
+    ) {
+      await oauthProtectedResourceHandler(req, res);
+      return;
+    }
+    // Authorization-server metadata (RFC 8414).
+    if (
+      path === "/.well-known/oauth-authorization-server" ||
+      path.startsWith("/.well-known/oauth-authorization-server/") ||
+      path === "/api/oauth-authorization-server"
+    ) {
+      await oauthAuthorizationServerHandler(req, res);
+      return;
+    }
+    // Login/consent page + authorization-code issuance.
+    if (path === "/authorize" || path === "/api/authorize") {
+      await authorizeHandler(req, res);
+      return;
+    }
+    // Token endpoint (authorization_code + refresh_token grants).
+    if (path === "/token" || path === "/api/token") {
+      await tokenHandler(req, res);
+      return;
+    }
+    // Dynamic client registration (RFC 7591).
+    if (path === "/register" || path === "/api/oauth-register") {
+      await oauthRegisterHandler(req, res);
+      return;
+    }
+
     if (path === "/" || path === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
@@ -95,6 +142,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/daily-cfa",
             "/api/cron/daily-cf-leads",
             "/api/cron/daily-boom-screenings",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-authorization-server",
+            "/authorize",
+            "/token",
+            "/register",
           ],
         }),
       );

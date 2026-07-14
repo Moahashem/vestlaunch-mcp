@@ -70,6 +70,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
+import { readAccessToken } from "./_oauth";
+
 export const config = { maxDuration: 60 };
 
 /** CRM API keys minted in Settings -> API Keys always start with this. */
@@ -1385,30 +1387,48 @@ export default async function handler(
     perUserApiKey = undefined; // legacy shared-token mode (env VESTLAUNCH_API_KEY)
   } else if (bearer.startsWith(CRM_KEY_PREFIX)) {
     perUserApiKey = bearer; // per-user CRM key; validated by /api/v1/me below
-  } else if (bearer && authkitDomain()) {
-    // Mode 1: a WorkOS access token from the sign-in flow. Verify -> map to key.
-    let identity: Identity;
+  } else if (bearer) {
+    // Primary path: an access token minted by OUR self-hosted OAuth server
+    // (this is what Claude Desktop's "Connect" flow returns). The token is an
+    // encrypted JWE that carries the user's CRM key. Decrypt it and use that key.
+    let ownKey: string | undefined;
     try {
-      identity = await verifyWorkosToken(bearer);
+      ownKey = (await readAccessToken(bearer)).crmKey;
     } catch {
+      ownKey = undefined;
+    }
+    if (ownKey) {
+      perUserApiKey = ownKey;
+    } else if (authkitDomain()) {
+      // Legacy fallback: a WorkOS access token from the old sign-in flow.
+      // Verify -> map identity to a CRM key. Only active if WorkOS is configured.
+      let identity: Identity;
+      try {
+        identity = await verifyWorkosToken(bearer);
+      } catch {
+        sendUnauthorized(res, "Invalid or expired sign-in token");
+        return;
+      }
+      const mapped = crmKeyForIdentity(identity);
+      if (!mapped) {
+        // Authenticated, but no CRM access provisioned for this person.
+        sendJson(res, 403, {
+          jsonrpc: "2.0",
+          error: {
+            code: -32003,
+            message:
+              "Signed in, but no CRM access is provisioned for your account yet. Ask the VestLaunch owner to add you.",
+          },
+          id: null,
+        });
+        return;
+      }
+      perUserApiKey = mapped;
+    } else {
+      // Token isn't one of ours and WorkOS isn't configured — reject.
       sendUnauthorized(res, "Invalid or expired sign-in token");
       return;
     }
-    const mapped = crmKeyForIdentity(identity);
-    if (!mapped) {
-      // Authenticated, but no CRM access provisioned for this person.
-      sendJson(res, 403, {
-        jsonrpc: "2.0",
-        error: {
-          code: -32003,
-          message:
-            "Signed in, but no CRM access is provisioned for your account yet. Ask the VestLaunch owner to add you.",
-        },
-        id: null,
-      });
-      return;
-    }
-    perUserApiKey = mapped;
   } else {
     // No usable credential — challenge the client to start the sign-in flow.
     sendUnauthorized(res);

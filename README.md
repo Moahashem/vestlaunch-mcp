@@ -131,10 +131,11 @@ Tools are discovered at runtime from the CRM's `/api/v1/me` manifest. As of CRM 
 - `vestlaunch_list_campaigns`, `vestlaunch_get_campaign`
 - `vestlaunch_list_workflows`, `vestlaunch_get_workflow`
 - `vestlaunch_list_bookings`
+- `vestlaunch_list_event_types`, `vestlaunch_get_event_type`
 - `vestlaunch_get_me`
 - `vestlaunch_get_agent_notes`, `vestlaunch_recall_memory`, `vestlaunch_query_knowledge`
 
-Enabling writes (`VESTLAUNCH_ENABLE_WRITES=true`) plus the appropriate scopes adds create/update/delete variants, plus `vestlaunch_send_email`, `vestlaunch_send_sms`, `vestlaunch_log_call`, `vestlaunch_enroll_in_campaign`, `vestlaunch_trigger_workflow`, `vestlaunch_store_memory`, `vestlaunch_store_knowledge`, and the rest of the write surface.
+Enabling writes (`VESTLAUNCH_ENABLE_WRITES=true`) plus the appropriate scopes adds create/update/delete variants, plus `vestlaunch_send_email`, `vestlaunch_send_sms`, `vestlaunch_log_call`, `vestlaunch_enroll_in_campaign`, `vestlaunch_trigger_workflow`, `vestlaunch_store_memory`, `vestlaunch_store_knowledge`, `vestlaunch_create_event_type`, `vestlaunch_update_event_type`, `vestlaunch_add_event_type_question`, `vestlaunch_add_event_type_member`, and the rest of the write surface.
 
 ## Tool shape
 

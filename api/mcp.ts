@@ -71,6 +71,17 @@ import {
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import { readAccessToken } from "./_oauth";
+import {
+  APPFOLIO_ENTRY_TOOLS,
+  APPFOLIO_ENTRY_TOOL_NAMES,
+  appfolioEntryToolsEnabled,
+  callAppfolioEntryTool,
+} from "./appfolio-entry-tools";
+
+/** The CRM scope a caller's OWN key must carry to see/call the AppFolio
+ *  entry-agent tools (they proxy a privileged token — env-present alone is
+ *  NOT authorization; adversarial-review fix). */
+const APPFOLIO_ENTRY_REQUIRED_SCOPE = "agent:write";
 
 export const config = { maxDuration: 60 };
 
@@ -925,7 +936,10 @@ async function getFflHuddleAppfolio(cfg: Cfg): Promise<unknown> {
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
-  const me = await crmRequest<{ identity?: { scopes?: string[] }; capabilities?: ManifestTool[] }>(
+  const me = await crmRequest<{
+    identity?: { scopes?: string[]; name?: string; email?: string };
+    capabilities?: ManifestTool[];
+  }>(
     cfg,
     "GET",
     "/api/v1/me",
@@ -974,6 +988,19 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
   const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
 
+  // AppFolio entry-agent smart tools (Phase 3, owner onboarding). They proxy
+  // a PRIVILEGED token (never the caller's key), so exposure requires BOTH:
+  // the token configured here AND the caller's own key carrying agent:write
+  // (or *) — the ?tools= filter is cosmetic and grants nothing.
+  const appfolioAuthorized =
+    appfolioEntryToolsEnabled() && hasScope(APPFOLIO_ENTRY_REQUIRED_SCOPE, scopes);
+  const appfolioTools = appfolioAuthorized
+    ? APPFOLIO_ENTRY_TOOLS.filter((t) => !toolFilter || toolFilter.has(t.name))
+    : [];
+  // Audit attribution for these tools comes from the AUTHENTICATED identity,
+  // never from tool arguments (callers must not spoof the review history).
+  const appfolioCallerIdentity = data.identity?.email || data.identity?.name || undefined;
+
   const server = new Server({ name: "vestlaunch-mcp", version: "0.1.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -1015,11 +1042,31 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       ...(includeHudAfTool
         ? [{ name: FFL_HUDAF_TOOL_NAME, description: FFL_HUDAF_TOOL_DESC, inputSchema: FFL_HUDAF_TOOL_SCHEMA }]
         : []),
+      ...appfolioTools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
     ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: rawArgs } = req.params;
+
+    if (APPFOLIO_ENTRY_TOOL_NAMES.has(name)) {
+      if (!appfolioTools.some((t) => t.name === name)) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await callAppfolioEntryTool(
+          name,
+          (rawArgs ?? {}) as Record<string, unknown>,
+          appfolioCallerIdentity,
+        );
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Error invoking ${name}: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    }
 
     if (name === COUNT_TOOL_NAME) {
       if (!includeCountTool) {

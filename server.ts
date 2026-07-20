@@ -12,6 +12,7 @@
  *   - GET/POST /api/cron/daily-showmojo      → the daily FFL ShowMojo/Homes trigger
  *   - GET/POST /api/cron/daily-cfa           → the daily Cranbrook/CFA trigger
  *   - GET/POST /api/cron/daily-boom-screenings → the daily Boom screenings → ffl.applications pull
+ *   - GET/POST /api/cron/appfolio-entry        → queue-aware hourly AppFolio entry-agent kickoff
  *
  * ⚠️ ROUTING RULE (learned 2026-06-09): adding a file under api/cron/ does NOT
  * create a route. Every new cron/endpoint MUST also be (1) imported here,
@@ -37,6 +38,7 @@ import showmojoCronHandler from "./api/cron/daily-showmojo";
 import cfaCronHandler from "./api/cron/daily-cfa";
 import cfLeadsCronHandler from "./api/cron/daily-cf-leads";
 import boomScreeningsCronHandler from "./api/cron/daily-boom-screenings";
+import appfolioEntryCronHandler from "./api/cron/appfolio-entry";
 
 // Self-hosted OAuth 2.1 authorization server (for Claude Desktop's
 // custom-connector "Connect" button). These MUST be routed here because this
@@ -87,6 +89,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (path === "/api/cron/daily-boom-screenings") {
       await boomScreeningsCronHandler(req, res);
+      return;
+    }
+    if (path === "/api/cron/appfolio-entry") {
+      await appfolioEntryCronHandler(req, res);
       return;
     }
     // ── Self-hosted OAuth 2.1 endpoints ──
@@ -142,6 +148,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/daily-cfa",
             "/api/cron/daily-cf-leads",
             "/api/cron/daily-boom-screenings",
+            "/api/cron/appfolio-entry",
             "/.well-known/oauth-protected-resource",
             "/.well-known/oauth-authorization-server",
             "/authorize",

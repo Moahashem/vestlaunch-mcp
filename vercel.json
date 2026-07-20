@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "echo 'no build step — Vercel bundles server.ts directly'",
+  "buildCommand": "echo 'no build step \u2014 Vercel bundles server.ts directly'",
   "rewrites": [
     {
       "source": "/.well-known/oauth-protected-resource",
@@ -28,30 +28,109 @@
     }
   ],
   "crons": [
-    { "path": "/api/cron/daily-lead-count", "schedule": "0 11 * * *" },
-    { "path": "/api/cron/daily-lead-count", "schedule": "20 11 * * *" },
-    { "path": "/api/cron/daily-lead-count", "schedule": "40 11 * * *" },
-    { "path": "/api/cron/daily-lead-count", "schedule": "20 12 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "10 11 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "30 11 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "50 11 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "10 12 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "30 12 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "50 12 * * *" },
-    { "path": "/api/cron/daily-occupancy", "schedule": "0 13 * * *" },
-    { "path": "/api/cron/daily-showmojo", "schedule": "20 11 * * *" },
-    { "path": "/api/cron/daily-showmojo", "schedule": "40 11 * * *" },
-    { "path": "/api/cron/daily-showmojo", "schedule": "0 12 * * *" },
-    { "path": "/api/cron/daily-showmojo", "schedule": "20 12 * * *" },
-    { "path": "/api/cron/daily-showmojo", "schedule": "40 12 * * *" },
-    { "path": "/api/cron/daily-showmojo", "schedule": "0 13 * * *" },
-    { "path": "/api/cron/daily-cfa", "schedule": "30 11 * * *" },
-    { "path": "/api/cron/daily-cfa", "schedule": "50 11 * * *" },
-    { "path": "/api/cron/daily-cfa", "schedule": "10 12 * * *" },
-    { "path": "/api/cron/daily-cf-leads", "schedule": "40 11 * * *" },
-    { "path": "/api/cron/daily-cf-leads", "schedule": "0 12 * * *" },
-    { "path": "/api/cron/daily-cf-leads", "schedule": "20 12 * * *" },
-    { "path": "/api/cron/daily-boom-screenings", "schedule": "5 13 * * *" },
-    { "path": "/api/cron/daily-boom-screenings", "schedule": "5 14 * * *" }
+    {
+      "path": "/api/cron/daily-lead-count",
+      "schedule": "0 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-lead-count",
+      "schedule": "20 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-lead-count",
+      "schedule": "40 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-lead-count",
+      "schedule": "20 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-occupancy",
+      "schedule": "10 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-occupancy",
+      "schedule": "30 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-occupancy",
+      "schedule": "50 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-occupancy",
+      "schedule": "10 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-occupancy",
+      "schedule": "30 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-occupancy",
+      "schedule": "50 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-occupancy",
+      "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/cron/daily-showmojo",
+      "schedule": "20 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-showmojo",
+      "schedule": "40 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-showmojo",
+      "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-showmojo",
+      "schedule": "20 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-showmojo",
+      "schedule": "40 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-showmojo",
+      "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/cron/daily-cfa",
+      "schedule": "30 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-cfa",
+      "schedule": "50 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-cfa",
+      "schedule": "10 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-cf-leads",
+      "schedule": "40 11 * * *"
+    },
+    {
+      "path": "/api/cron/daily-cf-leads",
+      "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-cf-leads",
+      "schedule": "20 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-boom-screenings",
+      "schedule": "5 13 * * *"
+    },
+    {
+      "path": "/api/cron/daily-boom-screenings",
+      "schedule": "5 14 * * *"
+    },
+    {
+      "path": "/api/cron/appfolio-entry",
+      "schedule": "15 13-22 * * 1-5"
+    }
   ]
 }

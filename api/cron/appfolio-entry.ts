@@ -8,14 +8,12 @@
  *
  *   1. INERT until configured: if APPFOLIO_AGENT_TOKEN is unset here, the
  *      cron no-ops silently (deploying this is safe before Phase 3 goes live).
- *   2. QUEUE PROBE: it claims the oldest PACKET_READY row via the #750 API
- *      (worker "cron-probe") and immediately RELEASEs it. Queue empty → no
- *      Managed Agent session is created (no spend). NOTE: when work EXISTS,
- *      the probe claim appends one history entry to that row (upstream logs
- *      claims); a stuck row accrues one entry per fire until processed —
- *      acceptable for v1, a read-only peek endpoint on ffl-crm would remove
- *      it (TODO, tracked in the plan doc). CRM 503 (its own token unset)
- *      while ours IS set → misconfig, flagged.
+ *   2. QUEUE PEEK: it reads the claimable PACKET_READY depth via the #750
+ *      read-only peek endpoint (no claim, no lease, no history mutation).
+ *      Queue empty → no Managed Agent session is created (no spend). CRM 503
+ *      (its own token unset) while ours IS set → misconfig, flagged.
+ *      (This replaced the old claim+release probe, which appended a
+ *      claim-history entry to the oldest row on every fire.)
  *   3. Only when work exists does it create a session for the AppFolio Entry
  *      Agent and send the kickoff prompt. If the release failed the lease
  *      still self-expires in 30 min, and the kickoff proceeds (the agent may
@@ -53,7 +51,6 @@ const BETA_HEADER = "managed-agents-2026-04-01";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 const AGENT_KEY = "appfolio-entry";
-const PROBE_WORKER = "cron-probe";
 
 /** Best-effort alert de-dupe across warm invocations: the same misconfig
  *  outcome alerts the hub at most once per 6h per warm instance (a cold start
@@ -100,47 +97,24 @@ function crmBaseUrl(): string {
 interface ProbeResult {
   outcome: "work" | "empty" | "crm-unconfigured" | "unauthorized" | "error";
   detail?: string;
-  releaseOk?: boolean;
 }
 
-/** Claim-then-release probe against the #750 API. Only proves work EXISTS. */
+/** Read-only peek against the #750 API. Proves work EXISTS without claiming
+ *  (no lease, no statusHistory entry — the old claim+release probe left one). */
 async function probeQueue(token: string): Promise<ProbeResult> {
   const base = crmBaseUrl();
-  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  const headers = { authorization: `Bearer ${token}` };
   try {
-    const claimRes = await fetch(`${base}/api/intake/agent/appfolio/claim`, {
-      method: "POST",
+    const res = await fetch(`${base}/api/intake/agent/appfolio/peek`, {
+      method: "GET",
       headers,
-      body: JSON.stringify({ worker: PROBE_WORKER }),
       signal: AbortSignal.timeout(15_000),
     });
-    if (claimRes.status === 503) return { outcome: "crm-unconfigured" };
-    if (claimRes.status === 401) return { outcome: "unauthorized" };
-    if (!claimRes.ok) return { outcome: "error", detail: `claim HTTP ${claimRes.status}` };
-    const data = (await claimRes.json()) as {
-      claimed: { reviewId: string; claimToken: string } | null;
-    };
-    if (!data.claimed) return { outcome: "empty" };
-
-    // Work exists — hand the row straight back so the agent can claim it.
-    let releaseOk = false;
-    try {
-      const relRes = await fetch(`${base}/api/intake/agent/appfolio/status`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          reviewId: data.claimed.reviewId,
-          claimToken: data.claimed.claimToken,
-          worker: PROBE_WORKER,
-          action: "RELEASE",
-        }),
-        signal: AbortSignal.timeout(15_000),
-      });
-      releaseOk = relRes.ok;
-    } catch {
-      // lease self-expires in 30 min — safe to proceed either way
-    }
-    return { outcome: "work", releaseOk };
+    if (res.status === 503) return { outcome: "crm-unconfigured" };
+    if (res.status === 401) return { outcome: "unauthorized" };
+    if (!res.ok) return { outcome: "error", detail: `peek HTTP ${res.status}` };
+    const data = (await res.json()) as { waiting?: number };
+    return (data.waiting ?? 0) > 0 ? { outcome: "work" } : { outcome: "empty" };
   } catch (err) {
     return { outcome: "error", detail: err instanceof Error ? err.message : String(err) };
   }
@@ -285,9 +259,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     await logAgentRun({
       agentKey: AGENT_KEY, status: "ok",
-      summary: `appfolio-entry agent triggered — packets waiting (session ${sessionId}${probe.releaseOk === false ? "; probe lease self-expiring" : ""})`,
+      summary: `appfolio-entry agent triggered — packets waiting (session ${sessionId})`,
     });
-    json(res, 200, { ok: true, kicked: true, session_id: sessionId, probe_release_ok: probe.releaseOk ?? null, triggered_at: new Date().toISOString() });
+    json(res, 200, { ok: true, kicked: true, session_id: sessionId, triggered_at: new Date().toISOString() });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await logAgentRun({ agentKey: AGENT_KEY, status: "failed", needsHuman: true, summary: `appfolio-entry: ${msg}` });

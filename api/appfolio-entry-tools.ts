@@ -12,8 +12,15 @@
  *  - Upstream auth is the DEDICATED agent bearer (env APPFOLIO_AGENT_TOKEN —
  *    the same value set on ffl-crm), NOT the caller's CRM key. The CRM side is
  *    fail-closed (503) until its env is set, and the packet is non-financial
- *    BY CONSTRUCTION (no tax IDs, bank details, access codes, credentials, or
- *    document URLs — see ffl-crm src/lib/intake/appfolio-agent.ts).
+ *    BY CONSTRUCTION (no tax ID values, bank details, access codes,
+ *    credentials, or document URLs — see ffl-crm src/lib/intake/appfolio-agent.ts).
+ *  - D13 (2026-07-20): the agent MAY enter the owner's SSN/EIN — but there is
+ *    DELIBERATELY no MCP tool for the value. The packet carries only a
+ *    taxId.onFile flag; the VPS EXECUTOR fetches the plaintext at typing time
+ *    from the claim-scoped audited CRM endpoint (/api/intake/agent/appfolio/
+ *    taxid, SensitiveAccessLog DECRYPT_FOR_EXPORT before decrypt). Raw tax IDs
+ *    must never enter the Console agent's context or transcripts — do not add
+ *    such a tool.
  *  - These tools are only REGISTERED when (a) APPFOLIO_AGENT_TOKEN is set in
  *    this deployment's env AND (b) the CALLER's own CRM key carries the
  *    agent:write scope (or *) per /api/v1/me — a low-privilege or read-only
@@ -171,9 +178,11 @@ export const APPFOLIO_ENTRY_TOOLS: AppfolioToolDef[] = [
       "AppFolio entry agent: fetch the NON-FINANCIAL entry packet for a claimed review row — owner " +
       "identity/contact/entity, mailing address, property details, HOA, utilities, insurance, warranty " +
       "(no credentials), tenant + lease summary, listing fields, and document METADATA (no URLs). " +
-      "manualEntryRemaining flags (taxId/bank/accessCodes) mark what accounting enters BY HAND from the " +
+      "manualEntryRemaining flags (bank/accessCodes) mark what accounting enters BY HAND from the " +
       "audited §5.5 packet — those fields are structurally absent here and must never be entered by the " +
-      "agent. READ-ONLY.",
+      "agent. taxId.onFile means the EXECUTOR will fetch and type the SSN/EIN itself at entry time " +
+      "(claim-scoped, audited) — the value is never available to you; never ask for or handle raw tax " +
+      "IDs. READ-ONLY.",
     inputSchema: {
       type: "object",
       properties: { ...REVIEW_ID_PROP, ...CLAIM_TOKEN_PROP },

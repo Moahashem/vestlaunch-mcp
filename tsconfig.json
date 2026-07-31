@@ -18,5 +18,6 @@
     "sourceMap": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "// exclude": "Tests are typechecked by vitest, never shipped — dist/ is what the MCP host launches.",
+  "exclude": ["node_modules", "dist", "src/__tests__"]
 }

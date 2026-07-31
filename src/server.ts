@@ -3,6 +3,10 @@
  * capability as an MCP tool, and wires the call/list handlers.
  */
 
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -27,9 +31,47 @@ export interface BuiltServer {
   toolCount: number;
 }
 
+/**
+ * WHICH BUILD IS THIS? (s31d)
+ *
+ * The connector is launched by absolute path from the MCP host's config, so
+ * "the code running" and "the code in the repo you are editing" are two
+ * different things — and for three sessions they silently were. Fixes sat on
+ * `main` while the live server ran a months-old `dist/` from a second checkout
+ * nobody remembered, and the only way to notice was archaeology.
+ *
+ * So the server now says who it is, in its first log line: the directory it
+ * was actually loaded from, and the git HEAD of that directory. A stale build
+ * announces itself instead of being deduced. Best-effort by design — a
+ * published npm install has no .git and simply reports "not-a-checkout"
+ * rather than failing to boot over a diagnostic.
+ */
+function buildIdentity(): { loadedFrom: string; gitHead: string } {
+  const loadedFrom = path.resolve(fileURLToPath(import.meta.url), "..", "..");
+  let gitHead = "not-a-checkout";
+  try {
+    gitHead = execFileSync("git", ["-C", loadedFrom, "rev-parse", "--short", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const dirty = execFileSync("git", ["-C", loadedFrom, "status", "--porcelain", "--untracked-files=no", "--", "src"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (dirty) gitHead += "+dirty(src)";
+  } catch {
+    /* not a checkout, or no git — the fallback is the answer */
+  }
+  return { loadedFrom, gitHead };
+}
+
 export async function buildServer(config: Config): Promise<BuiltServer> {
   const client = new ApiClient(config);
+  const identity = buildIdentity();
   log.info(`bootstrapping MCP server`, {
+    version: SERVER_VERSION,
+    loadedFrom: identity.loadedFrom,
+    gitHead: identity.gitHead,
     baseUrl: config.baseUrl,
     enableWrites: config.enableWrites,
   });

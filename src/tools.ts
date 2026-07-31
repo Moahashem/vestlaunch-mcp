@@ -194,10 +194,18 @@ export async function executeTool(
       def.meta.method === "GET" && isPlainObject(rawInput.query)
         ? (rawInput.query as Record<string, string | number | boolean | undefined | null>)
         : undefined;
+    // s31 — a write ALWAYS carries an object, even an empty one. Leaving this
+    // `undefined` sent `Content-Type: application/json` with no payload, and
+    // the CRM route's `await req.json()` answered 400 "Invalid JSON" before it
+    // ever read a field. `{}` earns the route's real validation message
+    // ("No updatable fields provided") instead of a parse error that looks
+    // like a connector bug. See the encoding contract in api-client.ts.
     body =
-      def.meta.method !== "GET" && isPlainObject(rawInput.body)
-        ? rawInput.body
-        : undefined;
+      def.meta.method === "GET"
+        ? undefined
+        : isPlainObject(rawInput.body)
+          ? rawInput.body
+          : {};
   }
 
   const response = await client.request({

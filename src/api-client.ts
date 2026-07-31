@@ -45,14 +45,30 @@ export class ApiClient {
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
     try {
       log.debug(`${opts.method} ${opts.path}`, { query: opts.query });
+      // ENCODING CONTRACT (fixed 2026-07-31, s31 — this is why every
+      // vestlaunch_update_* call returned 400 "Invalid JSON"):
+      //
+      // We used to send `Content-Type: application/json` on EVERY request
+      // while sending `body: undefined` whenever the caller had no body. A
+      // CRM write route does `await req.json()`, and parsing an empty payload
+      // that claims to be JSON throws — so the route answered "Invalid JSON"
+      // before it ever looked at the request. The header promised a document
+      // that was not there.
+      //
+      // Now the two travel together: a write always carries a JSON body (`{}`
+      // at worst, which earns a real field-level validation error instead of a
+      // parse error), and the header is only set when a body is actually
+      // written. A GET stays bodiless and unheadered.
+      const sendsBody = opts.method !== "GET" || opts.body !== undefined;
+      const payload = sendsBody ? JSON.stringify(opts.body ?? {}) : undefined;
       const res = await fetch(url, {
         method: opts.method,
         headers: {
           Authorization: `Bearer ${this.config.apiKey}`,
-          "Content-Type": "application/json",
+          ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
           "User-Agent": "vestlaunch-mcp/0.1.0",
         },
-        body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+        body: payload,
         signal: controller.signal,
       });
       const text = await res.text();

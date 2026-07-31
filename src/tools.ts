@@ -68,12 +68,14 @@ export function buildToolDefinition(
   // ── Preferred: schema-driven (the CRM manifest published an inputSchema) ──
   // Register the tool with the manifest's flat argument schema directly, so
   // every parameter is named, typed, and documented to the model.
+  // s31 — an EMPTY `properties` bag is a real answer, not a missing one. The
+  // old `length > 0` test demoted every genuinely no-argument endpoint
+  // (get_pipelines, list_tags, list_lead_sources, get_me, list_api_keys,
+  // list_webhooks) to the legacy fallback, which then invented a `query` blob
+  // and told the model to fill it. "This tool takes nothing" is more useful
+  // than "this tool takes an undocumented object".
   const schema = tool.inputSchema;
-  if (
-    schema &&
-    isPlainObject(schema.properties) &&
-    Object.keys(schema.properties as Record<string, unknown>).length > 0
-  ) {
+  if (schema && isPlainObject(schema.properties)) {
     const req = Array.isArray(schema.required) ? schema.required : [];
     return {
       name: `${TOOL_PREFIX}${tool.name}`,
@@ -206,6 +208,28 @@ export async function executeTool(
         : isPlainObject(rawInput.body)
           ? rawInput.body
           : {};
+  }
+
+  // s31 — DELETE carries its arguments in BOTH the query string and the body.
+  //
+  // A DELETE has no settled convention for where parameters live, and the CRM
+  // is split down the middle: the nine `/:id` deletes take theirs in the path,
+  // but `delete_agent_state` (`agentKey`, `key`) and `delete_knowledge` (`id`)
+  // read `request.nextUrl.searchParams`. We sent body-only, so both tools were
+  // 100% unusable — they answered "…query params required" for parameters the
+  // caller had supplied, which reads as a caller error and is not one.
+  //
+  // Duplicating into the query string costs nothing (a route that reads the
+  // body ignores it, and vice versa) and means the connector no longer has to
+  // know which convention each route picked. Scalars only — a nested object
+  // would stringify to "[object Object]" in a URL, and any route wanting
+  // structure reads the body anyway.
+  if (def.meta.method === "DELETE" && isPlainObject(body)) {
+    const scalars: Record<string, string | number | boolean> = {};
+    for (const [k, v] of Object.entries(body)) {
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") scalars[k] = v;
+    }
+    if (Object.keys(scalars).length > 0) query = { ...(query ?? {}), ...scalars };
   }
 
   const response = await client.request({

@@ -10,6 +10,7 @@
  *   - GET/POST /api/cron/daily-lead-count    → the daily Sales lead-count trigger
  *   - GET/POST /api/cron/daily-occupancy     → the daily FFL occupancy trigger (Agent #2)
  *   - GET/POST /api/cron/daily-showmojo      → the daily FFL ShowMojo/Homes trigger
+ *   - GET/POST /api/cron/daily-onboarding    → the daily FFL Owner Onboarding trigger
  *   - GET/POST /api/cron/daily-cfa           → the daily Cranbrook/CFA trigger
  *   - GET/POST /api/cron/daily-boom-screenings → the daily Boom screenings → ffl.applications pull
  *   - GET/POST /api/cron/appfolio-entry        → queue-aware hourly AppFolio entry-agent kickoff
@@ -36,6 +37,7 @@ import agentOsMcpHandler from "./api/agent-os-mcp";
 import cronHandler from "./api/cron/daily-lead-count";
 import occupancyCronHandler from "./api/cron/daily-occupancy";
 import showmojoCronHandler from "./api/cron/daily-showmojo";
+import onboardingCronHandler from "./api/cron/daily-onboarding";
 import cfaCronHandler from "./api/cron/daily-cfa";
 import cfLeadsCronHandler from "./api/cron/daily-cf-leads";
 import boomScreeningsCronHandler from "./api/cron/daily-boom-screenings";
@@ -75,6 +77,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (path === "/api/cron/daily-occupancy") {
       await occupancyCronHandler(req, res);
+      return;
+    }
+    if (path === "/api/cron/daily-onboarding") {
+      await onboardingCronHandler(req, res);
       return;
     }
     if (path === "/api/cron/daily-showmojo") {
@@ -151,6 +157,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/daily-lead-count",
             "/api/cron/daily-occupancy",
             "/api/cron/daily-showmojo",
+            "/api/cron/daily-onboarding",
             "/api/cron/daily-cfa",
             "/api/cron/daily-cf-leads",
             "/api/cron/daily-boom-screenings",

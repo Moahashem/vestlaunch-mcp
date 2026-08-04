@@ -653,6 +653,48 @@ async function getFflHomes(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-homes" };
 }
 
+// --- SMART TOOL: get_ffl_onboarding ---
+// Thin-agent / smart-tools (D13). Returns the owner-onboarding roster for the Company
+// Numbers onboarding block: one row per owner-property, from the day the agreement is
+// signed until the property is on the market or rented. Every stage, exit rule and stall
+// clock is resolved server-side. Reads /api/v1/analytics/ffl-onboarding. READ-ONLY.
+const FFL_ONBOARDING_TOOL_NAME = "get_ffl_onboarding";
+const FFL_ONBOARDING_TOOL_DESC =
+  "Smart server-side aggregation: returns the owner-onboarding roster for the Company Numbers " +
+  "onboarding block - one row per owner-property, from signing until the property is ON THE MARKET " +
+  "or RENTED (rows that reach either are dropped automatically). Cohort = every OwnerIntake, " +
+  "complete or not. Returns { in_flight, stalled_count, rows, exited, stall_thresholds, sources, " +
+  "diagnostics, as_of, source }. Each row: { ownerName, propertyAddress, signedAt, daysSinceSigned, " +
+  "intake ('done' | '<n>%' | 'not started'), intakeDoneAt, orientation, inLeadSimple, onMarket, " +
+  "pmOnlyWaiting, rented, stalled ({ stage, label, daysOverdue } or null), serviceTypeAssumed }. " +
+  "Rows are pre-sorted worst-first (most overdue, then longest-signed), so truncating the list " +
+  "only ever drops HEALTHY rows. IMPORTANT: honour sources - if sources.showmojo_ok is false, the " +
+  "On Market column is UNKNOWN, not empty; leave it alone rather than writing a blank. Same for " +
+  "sources.rent_roll_ok and the Rented column. diagnostics.leadsimple_caveat documents a known " +
+  "false negative for TP_ONLY (listing-only) owners. " +
+  "Source = /api/v1/analytics/ffl-onboarding. No arguments. Read-only.";
+const FFL_ONBOARDING_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getFflOnboarding(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-onboarding");
+  if (!resp.success) {
+    throw new Error(
+      `ffl-onboarding endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-onboarding (ffl-crm PR #890) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || !Array.isArray((d as Record<string, unknown>).rows)) {
+    throw new Error("ffl-onboarding endpoint returned an unexpected shape (no rows array).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-onboarding" };
+}
+
 // --- SMART TOOL: get_ffl_leasing ---
 // Thin-agent / smart-tools (D13). Returns FFL "Apps & Leases" metrics (Company Numbers
 // row 23, A23-E23) computed server-side. Leases-signed (C23/D23/E23) come from AppFolio
@@ -980,6 +1022,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
+  const includeFflOnboardingTool = !toolFilter || toolFilter.has(FFL_ONBOARDING_TOOL_NAME);
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
@@ -1020,6 +1063,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflHomesTool
         ? [{ name: FFL_HOMES_TOOL_NAME, description: FFL_HOMES_TOOL_DESC, inputSchema: FFL_HOMES_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflOnboardingTool
+        ? [{ name: FFL_ONBOARDING_TOOL_NAME, description: FFL_ONBOARDING_TOOL_DESC, inputSchema: FFL_ONBOARDING_TOOL_SCHEMA }]
         : []),
       ...(includeFflLeasingTool
         ? [{ name: FFL_LEASING_TOOL_NAME, description: FFL_LEASING_TOOL_DESC, inputSchema: FFL_LEASING_TOOL_SCHEMA }]
@@ -1130,6 +1176,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_DEL_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_ONBOARDING_TOOL_NAME) {
+      if (!includeFflOnboardingTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflOnboarding(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_ONBOARDING_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

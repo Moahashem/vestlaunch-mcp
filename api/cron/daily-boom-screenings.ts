@@ -138,7 +138,10 @@ function propertyLabel(app: Record<string, unknown>): string {
       const cand = o.address ?? o.full_address ?? o.name ?? o.street ?? o.address_line_1 ?? o.addressLine1;
       if (typeof cand === "string" && cand.trim()) return cand.trim();
       if (cand && typeof cand === "object") {
-        const n = (cand as Record<string, unknown>).full ?? (cand as Record<string, unknown>).street ?? (cand as Record<string, unknown>).line1;
+        // Verified via probe 2026-08-09: Boom property.address is an object
+        // whose best label is one_line_address (address1/city/state also present).
+        const c = cand as Record<string, unknown>;
+        const n = c.one_line_address ?? c.full ?? c.address1 ?? c.street ?? c.line1;
         if (typeof n === "string" && n.trim()) return n.trim();
       }
     }
@@ -156,6 +159,7 @@ async function fetchPropertyMap(base: string, token: string): Promise<Map<string
       const r = await fetch(`${base}/partner/v1/properties?page=${page}&per_page=100`, {
         headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       });
+      if (page === 1) console.log(`[boom-screenings] properties page1 -> ${r.status}`);
       if (!r.ok) break;
       let parsed: unknown = null;
       try {
@@ -164,6 +168,13 @@ async function fetchPropertyMap(base: string, token: string): Promise<Map<string
         break;
       }
       const batch = extractList(parsed);
+      if (page === 1)
+        console.log(
+          "[boom-screenings] property shape:",
+          batch[0]
+            ? JSON.stringify(describeShape(batch[0]))
+            : `empty batch; top-level keys: ${parsed && typeof parsed === "object" ? Object.keys(parsed as object).join(",") : typeof parsed}`,
+        );
       for (const p of batch) {
         const id = typeof p.id === "string" ? p.id : String(p.id ?? "");
         if (!id) continue;

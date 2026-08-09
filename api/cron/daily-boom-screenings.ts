@@ -94,6 +94,70 @@ function statusOf(app: Record<string, unknown>): string {
   return typeof s === "string" ? s.toLowerCase() : "";
 }
 
+// ── Applicant-name extraction (defensive, same philosophy as submittedDate) ──
+// Boom group applications carry multiple applicants; the portal renders them
+// as "(2) Jane Doe, John Doe". Field names are undocumented, so try the
+// obvious shapes and fall back gracefully.
+function personName(o: Record<string, unknown>): string {
+  const direct = o.name ?? o.full_name ?? o.fullName;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const first = o.first_name ?? o.firstName ?? "";
+  const middle = o.middle_name ?? o.middleName ?? "";
+  const last = o.last_name ?? o.lastName ?? "";
+  return [first, middle, last]
+    .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    .map((p) => p.trim())
+    .join(" ");
+}
+function applicantNames(app: Record<string, unknown>): string[] {
+  for (const k of ["applicants", "applicant_group", "members", "people"]) {
+    const v = app[k];
+    if (Array.isArray(v)) {
+      const names = v
+        .filter((a): a is Record<string, unknown> => !!a && typeof a === "object")
+        .map((a) => personName((a.applicant as Record<string, unknown>) ?? a))
+        .filter(Boolean);
+      if (names.length) return names;
+    }
+  }
+  for (const k of ["applicant", "primary_applicant", "primaryApplicant"]) {
+    const v = app[k];
+    if (v && typeof v === "object") {
+      const n = personName(v as Record<string, unknown>);
+      if (n) return [n];
+    }
+  }
+  const flat = personName(app);
+  return flat ? [flat] : [];
+}
+function propertyLabel(app: Record<string, unknown>): string {
+  for (const k of ["property", "unit", "listing"]) {
+    const v = app[k];
+    if (v && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      const cand = o.address ?? o.full_address ?? o.name ?? o.street ?? o.address_line_1 ?? o.addressLine1;
+      if (typeof cand === "string" && cand.trim()) return cand.trim();
+      if (cand && typeof cand === "object") {
+        const n = (cand as Record<string, unknown>).full ?? (cand as Record<string, unknown>).street ?? (cand as Record<string, unknown>).line1;
+        if (typeof n === "string" && n.trim()) return n.trim();
+      }
+    }
+  }
+  const flat = app.property_address ?? app.propertyAddress ?? app.address ?? app.unit_address;
+  return typeof flat === "string" ? flat.trim() : "";
+}
+// PII-safe shape describer for the run log: key paths + types only, no values.
+function describeShape(o: unknown, depth = 0): unknown {
+  if (o === null || o === undefined) return String(o);
+  if (Array.isArray(o)) return o.length ? [describeShape(o[0], depth + 1)] : [];
+  if (typeof o === "object" && depth < 3) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(o as Record<string, unknown>)) out[k] = describeShape(v, depth + 1);
+    return out;
+  }
+  return typeof o;
+}
+
 // Extract an array of application objects from various response shapes.
 function extractList(parsed: unknown): Record<string, unknown>[] {
   if (Array.isArray(parsed)) return parsed as Record<string, unknown>[];
@@ -295,6 +359,15 @@ export default async function handler(
     let approvedThis = 0;
     let declinedThis = 0;
     let pendingThis = 0;
+    // Applicant roster for the trailing 7 days — names + property + status,
+    // so the Daily Numbers notes answer "WHO applied this week", not just how many.
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const recentApplicants: {
+      names: string[];
+      property: string;
+      status: string;
+      submittedAt: string;
+    }[] = [];
     for (const app of apps) {
       const sd = submittedDate(app);
       if (!sd) continue;
@@ -308,7 +381,36 @@ export default async function handler(
       } else if (ym === lastYM) {
         submittedLast++;
       }
+      if (sd.getTime() >= weekAgo) {
+        recentApplicants.push({
+          names: applicantNames(app),
+          property: propertyLabel(app),
+          status: statusOf(app) || "submitted",
+          submittedAt: sd.toISOString(),
+        });
+      }
     }
+    recentApplicants.sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
+    if (recentApplicants.length > 25) recentApplicants.length = 25;
+    // Human-readable line for the snapshot's valueText (the "notes" surface).
+    const fmtDay = (iso: string) =>
+      new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "short", day: "numeric" }).format(
+        new Date(iso),
+      );
+    const weekLine = recentApplicants.length
+      ? `Applied past 7d (${recentApplicants.length}): ` +
+        recentApplicants
+          .map(
+            (r) =>
+              `${r.names.length ? r.names.join(" & ") : "(name unavailable)"}${r.property ? ` — ${r.property}` : ""} (${fmtDay(r.submittedAt)}${r.status && r.status !== "submitted" ? `, ${r.status}` : ""})`,
+          )
+          .join("; ")
+      : "No applications in the past 7 days.";
+    // One-time/ongoing PII-safe shape log so field-name drift is diagnosable
+    // from Vercel logs without redeploying (keys + types only, no values).
+    if (apps[0]) console.log("[boom-screenings] app shape:", JSON.stringify(describeShape(apps[0])));
+    if (recentApplicants.some((r) => r.names.length === 0))
+      console.log("[boom-screenings] WARNING: some recent apps yielded no applicant name — check shape log");
 
     // --- 4. Upsert the hub snapshot (ffl.applications) ---
     const apiKey = hubKey();
@@ -320,6 +422,7 @@ export default async function handler(
         body: JSON.stringify({
           metricKey: "ffl.applications",
           value: submittedThis,
+          valueText: weekLine,
           unit: "count",
           source: "Boom",
           payload: {
@@ -330,6 +433,7 @@ export default async function handler(
             approved_this_month: approvedThis,
             declined_this_month: declinedThis,
             pending_this_month: pendingThis,
+            recent_applicants: recentApplicants,
           },
         }),
       });
@@ -339,7 +443,8 @@ export default async function handler(
     const summary =
       `boom-screenings: ${submittedThis} submitted this month ` +
       `(${approvedThis} appr / ${declinedThis} decl / ${pendingThis} pending), ` +
-      `${submittedLast} last month — from ${apps.length} apps [auth ${workingMode}]`;
+      `${submittedLast} last month, ${recentApplicants.length} in past 7d — ` +
+      `from ${apps.length} apps [auth ${workingMode}]`;
     await logAgentRun({
       agentKey: AGENT_KEY,
       status: snapshotOk ? "ok" : "partial",

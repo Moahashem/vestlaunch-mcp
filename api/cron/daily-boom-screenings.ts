@@ -146,6 +146,38 @@ function propertyLabel(app: Record<string, unknown>): string {
   const flat = app.property_address ?? app.propertyAddress ?? app.address ?? app.unit_address;
   return typeof flat === "string" ? flat.trim() : "";
 }
+// Applications carry only property_id/unit_id (verified from the shape log
+// 2026-08-09) — resolve addresses via the partner properties endpoint once per
+// run. Any failure degrades to empty labels, never a failed run.
+async function fetchPropertyMap(base: string, token: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  try {
+    for (let page = 1; page <= 10; page++) {
+      const r = await fetch(`${base}/partner/v1/properties?page=${page}&per_page=100`, {
+        headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+      });
+      if (!r.ok) break;
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(await r.text());
+      } catch {
+        break;
+      }
+      const batch = extractList(parsed);
+      for (const p of batch) {
+        const id = typeof p.id === "string" ? p.id : String(p.id ?? "");
+        if (!id) continue;
+        const label = propertyLabel({ property: p }) || propertyLabel(p);
+        if (label) map.set(id, label);
+      }
+      if (batch.length < 100) break;
+    }
+  } catch {
+    /* leave map as-is */
+  }
+  return map;
+}
+
 // PII-safe shape describer for the run log: key paths + types only, no values.
 function describeShape(o: unknown, depth = 0): unknown {
   if (o === null || o === undefined) return String(o);
@@ -365,6 +397,7 @@ export default async function handler(
     const recentApplicants: {
       names: string[];
       property: string;
+      propertyId: string;
       status: string;
       submittedAt: string;
     }[] = [];
@@ -382,12 +415,21 @@ export default async function handler(
         submittedLast++;
       }
       if (sd.getTime() >= weekAgo) {
+        const pid = app.property_id ?? app.propertyId;
         recentApplicants.push({
           names: applicantNames(app),
           property: propertyLabel(app),
+          propertyId: typeof pid === "string" ? pid : "",
           status: statusOf(app) || "submitted",
           submittedAt: sd.toISOString(),
         });
+      }
+    }
+    // Resolve property_id → address (apps carry no address inline).
+    if (recentApplicants.some((r) => !r.property && r.propertyId)) {
+      const propMap = await fetchPropertyMap(base, workingToken);
+      for (const r of recentApplicants) {
+        if (!r.property && r.propertyId) r.property = propMap.get(r.propertyId) ?? "";
       }
     }
     recentApplicants.sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));

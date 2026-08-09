@@ -120,6 +120,31 @@ interface AuthResp {
   data?: { token?: string; api_token?: string; access_token?: string };
 }
 
+// Boom's /authenticate response shape is undocumented. Rather than guess field
+// names, walk the parsed JSON (2 levels deep) and take the first string that
+// looks like a bearer token: a key matching token/jwt/key/secret, or failing
+// that, any string ≥ 20 chars. Also returns the key structure for diagnostics
+// so a future shape change tells us exactly what came back.
+function findTokenDeep(parsed: unknown): { token: string | null; shape: string } {
+  if (!parsed || typeof parsed !== "object") return { token: null, shape: typeof parsed };
+  const entries: [string, unknown][] = [];
+  const walk = (o: Record<string, unknown>, prefix: string, depth: number): void => {
+    for (const [k, v] of Object.entries(o)) {
+      entries.push([prefix + k, v]);
+      if (v && typeof v === "object" && !Array.isArray(v) && depth < 2)
+        walk(v as Record<string, unknown>, `${prefix}${k}.`, depth + 1);
+    }
+  };
+  walk(parsed as Record<string, unknown>, "", 0);
+  const shape = entries.map(([k]) => k).join(",").slice(0, 200);
+  const named = entries.find(
+    ([k, v]) => /token|jwt|key|secret/i.test(k.split(".").pop() ?? "") && typeof v === "string" && v.length >= 8,
+  );
+  if (named) return { token: named[1] as string, shape };
+  const longString = entries.find(([, v]) => typeof v === "string" && (v as string).length >= 20);
+  return { token: longString ? (longString[1] as string) : null, shape };
+}
+
 interface TokenCandidate {
   mode: string;
   token: string;
@@ -153,7 +178,14 @@ async function buildCandidates(
             candidates.push({ mode: "exchanged", token: t });
             authDiag += " token-ok";
           } else {
-            authDiag += " no-token-field";
+            // Unknown shape — hunt for the token and report what came back.
+            const deep = findTokenDeep(j);
+            if (deep.token) {
+              candidates.push({ mode: "exchanged-deep", token: deep.token });
+              authDiag += ` token-deep (shape: ${deep.shape})`;
+            } else {
+              authDiag += ` no-token-field (shape: ${deep.shape})`;
+            }
           }
         } catch {
           authDiag += " unparseable";

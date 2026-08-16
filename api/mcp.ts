@@ -535,6 +535,55 @@ async function getFflOccupancy(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-portfolio" };
 }
 
+
+// --- SMART TOOL: get_ffl_guest_cards ---
+// Phone -> prospect-name lookup against the AppFolio guest_cards report, via the
+// native CRM endpoint /api/v1/analytics/guest-card-lookup (ffl-crm, 2026-08-16).
+// Built for the caller-name-fill workforce agent: resolve phone-only or CNAM-junk
+// leads ("Wireless Caller", city-state caller-ID strings) to real prospect names.
+// READ-ONLY.
+const FFL_GUESTCARD_TOOL_NAME = "get_ffl_guest_cards";
+const FFL_GUESTCARD_TOOL_DESC =
+  "Phone -> prospect-name lookup against the AppFolio guest_cards report (leasing CRM). " +
+  "Pass 1-25 phone numbers in any formatting; matching is digits-only (leading US '1' dropped, " +
+  "last-10-digit exact, no fuzz). Returns per queried phone ALL matching guest cards newest-first " +
+  "({ name, phone_number, email_address, received, status, property, source, lead_type, " +
+  "guest_card_id }) plus unmatched and invalid lists. Multiple cards on one phone = ambiguous; " +
+  "the caller decides. Requires ffl-crm GET /api/v1/analytics/guest-card-lookup deployed and the " +
+  "Bearer key to have scope properties:read (or *). Read-only.";
+const FFL_GUESTCARD_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    phones: {
+      type: "array" as const,
+      items: { type: "string" as const },
+      minItems: 1,
+      maxItems: 25,
+      description: "Phone numbers to look up (any formatting; digits are extracted server-side).",
+    },
+  },
+  required: ["phones"],
+  additionalProperties: false,
+};
+
+async function getFflGuestCards(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
+  const phones = Array.isArray(rawArgs.phones)
+    ? (rawArgs.phones as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    : [];
+  if (phones.length === 0) throw new Error("phones must be a non-empty array of strings (1-25).");
+  if (phones.length > 25) throw new Error(`Too many phones (${phones.length}) - max 25 per call.`);
+  const qs = encodeURIComponent(phones.join(","));
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", `/api/v1/analytics/guest-card-lookup?phones=${qs}`);
+  if (!resp.success) {
+    throw new Error(
+      `guest-card-lookup endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/guest-card-lookup (ffl-crm) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/guest-card-lookup" };
+}
+
 // ───────────────────────── server bootstrap ─────────────────────────
 // --- SMART TOOL: get_ffl_renewals ---
 // Thin-agent / smart-tools (D13). Returns FFL lease-renewal metrics (Company Numbers
@@ -1019,6 +1068,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
 
   const includeCountTool = !toolFilter || toolFilter.has(COUNT_TOOL_NAME);
   const includeFflOccTool = !toolFilter || toolFilter.has(FFL_OCC_TOOL_NAME);
+  const includeFflGuestCardTool = !toolFilter || toolFilter.has(FFL_GUESTCARD_TOOL_NAME);
   const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
@@ -1054,6 +1104,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflOccTool
         ? [{ name: FFL_OCC_TOOL_NAME, description: FFL_OCC_TOOL_DESC, inputSchema: FFL_OCC_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflGuestCardTool
+        ? [{ name: FFL_GUESTCARD_TOOL_NAME, description: FFL_GUESTCARD_TOOL_DESC, inputSchema: FFL_GUESTCARD_TOOL_SCHEMA }]
         : []),
       ...(includeFflRenTool
         ? [{ name: FFL_REN_TOOL_NAME, description: FFL_REN_TOOL_DESC, inputSchema: FFL_REN_TOOL_SCHEMA }]
@@ -1142,6 +1195,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_OCC_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_GUESTCARD_TOOL_NAME) {
+      if (!includeFflGuestCardTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getFflGuestCards(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_GUESTCARD_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

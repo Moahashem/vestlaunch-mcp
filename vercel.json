@@ -143,6 +143,18 @@
     {
       "path": "/api/cron/daily-onboarding",
       "schedule": "50 12 * * *"
+    },
+    {
+      "path": "/api/cron/caller-name-fill",
+      "schedule": "18 13 * * *"
+    },
+    {
+      "path": "/api/cron/caller-name-fill",
+      "schedule": "18 17 * * *"
+    },
+    {
+      "path": "/api/cron/caller-name-fill",
+      "schedule": "18 21 * * *"
     }
   ]
 }

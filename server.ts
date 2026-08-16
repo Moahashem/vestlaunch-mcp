@@ -14,6 +14,7 @@
  *   - GET/POST /api/cron/daily-cfa           → the daily Cranbrook/CFA trigger
  *   - GET/POST /api/cron/daily-boom-screenings → the daily Boom screenings → ffl.applications pull
  *   - GET/POST /api/cron/appfolio-entry        → queue-aware hourly AppFolio entry-agent kickoff
+ *   - GET/POST /api/cron/caller-name-fill      → fills missing caller names on phone-only leads (AppFolio guest cards / LeadSimple)
  *   - POST /api/hooks/leadsimple-listing       → §5.6 owner-intake listing trigger → LeadSimple 03 Leasing Process
  *
  * ⚠️ ROUTING RULE (learned 2026-06-09): adding a file under api/cron/ does NOT
@@ -42,6 +43,7 @@ import cfaCronHandler from "./api/cron/daily-cfa";
 import cfLeadsCronHandler from "./api/cron/daily-cf-leads";
 import boomScreeningsCronHandler from "./api/cron/daily-boom-screenings";
 import appfolioEntryCronHandler from "./api/cron/appfolio-entry";
+import callerNameFillCronHandler from "./api/cron/caller-name-fill";
 import leadsimpleListingHookHandler from "./api/hooks/leadsimple-listing";
 
 // Self-hosted OAuth 2.1 authorization server (for Claude Desktop's
@@ -103,6 +105,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await appfolioEntryCronHandler(req, res);
       return;
     }
+    if (path === "/api/cron/caller-name-fill") {
+      await callerNameFillCronHandler(req, res);
+      return;
+    }
     if (path === "/api/hooks/leadsimple-listing") {
       await leadsimpleListingHookHandler(req, res);
       return;
@@ -162,6 +168,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/daily-cf-leads",
             "/api/cron/daily-boom-screenings",
             "/api/cron/appfolio-entry",
+            "/api/cron/caller-name-fill",
             "/api/hooks/leadsimple-listing",
             "/.well-known/oauth-protected-resource",
             "/.well-known/oauth-authorization-server",

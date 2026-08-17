@@ -14,6 +14,8 @@
  *   - GET/POST /api/cron/daily-cfa           → the daily Cranbrook/CFA trigger
  *   - GET/POST /api/cron/daily-boom-screenings → the daily Boom screenings → ffl.applications pull
  *   - GET/POST /api/cron/appfolio-entry        → queue-aware hourly AppFolio entry-agent kickoff
+ *   - POST/GET /api/recruiting-mcp             → recruiting cloud-half smart tools (Bearer-protected)
+ *   - GET/POST /api/cron/recruiting-sweep      → the daily recruiting sweep (cloud half) trigger
  *   - GET/POST /api/cron/caller-name-fill      → fills missing caller names on phone-only leads (AppFolio guest cards / LeadSimple)
  *   - POST /api/hooks/leadsimple-listing       → §5.6 owner-intake listing trigger → LeadSimple 03 Leasing Process
  *
@@ -44,6 +46,8 @@ import cfLeadsCronHandler from "./api/cron/daily-cf-leads";
 import boomScreeningsCronHandler from "./api/cron/daily-boom-screenings";
 import appfolioEntryCronHandler from "./api/cron/appfolio-entry";
 import callerNameFillCronHandler from "./api/cron/caller-name-fill";
+import recruitingSweepCronHandler from "./api/cron/recruiting-sweep";
+import recruitingMcpHandler from "./api/recruiting-mcp";
 import leadsimpleListingHookHandler from "./api/hooks/leadsimple-listing";
 
 // Self-hosted OAuth 2.1 authorization server (for Claude Desktop's
@@ -71,6 +75,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (path === "/api/agent-os-mcp") {
       await agentOsMcpHandler(req as IncomingMessage & { body?: unknown }, res);
+      return;
+    }
+    if (path === "/api/recruiting-mcp") {
+      await recruitingMcpHandler(req as IncomingMessage & { body?: unknown }, res);
       return;
     }
     if (path === "/api/cron/daily-lead-count") {
@@ -107,6 +115,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (path === "/api/cron/caller-name-fill") {
       await callerNameFillCronHandler(req, res);
+      return;
+    }
+    if (path === "/api/cron/recruiting-sweep") {
+      await recruitingSweepCronHandler(req, res);
       return;
     }
     if (path === "/api/hooks/leadsimple-listing") {
@@ -160,6 +172,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/mcp",
             "/api/ruckus-mcp",
             "/api/agent-os-mcp",
+            "/api/recruiting-mcp",
             "/api/cron/daily-lead-count",
             "/api/cron/daily-occupancy",
             "/api/cron/daily-showmojo",
@@ -169,6 +182,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/daily-boom-screenings",
             "/api/cron/appfolio-entry",
             "/api/cron/caller-name-fill",
+            "/api/cron/recruiting-sweep",
             "/api/hooks/leadsimple-listing",
             "/.well-known/oauth-protected-resource",
             "/.well-known/oauth-authorization-server",

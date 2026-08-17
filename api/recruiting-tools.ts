@@ -33,7 +33,8 @@
  *
  * SAFETY MODEL of send_recruiting_invite (Mo chose server-enforced, 2026-08-17):
  *  - Role → VideoAsk link map is HARD-CODED here; the agent can never send an
- *    arbitrary link or an off-template body.
+ *    arbitrary link or an off-template body. Out-of-scope roles (Maintenance/
+ *    VLS/EA/Turn Around) are refused outright before alias matching.
  *  - Dedup is ENFORCED in the tool: Gmail `in:sent to:<email>` AND VideoAsk
  *    Contacts search by LAST NAME (Golden Rule 1 — name, not email; the Rocky
  *    Garza case). A match refuses the send and returns the evidence.
@@ -573,11 +574,11 @@ export async function getNewApplicants(
   sinceIso: string,
 ): Promise<Record<string, unknown>> {
   const ch = channel.trim().toLowerCase();
-  const mailbox = await gmailVerifiedMailbox();
 
   if (ch === "hazelequity") {
     // Deliberately unswept in the cloud half: the connector/service account is
-    // flatfeelandlord-only. NEVER report this as "zero applicants".
+    // flatfeelandlord-only. NEVER report this as "zero applicants". (Checked
+    // BEFORE the mailbox verification — this channel needs no Gmail at all.)
     return {
       channel: ch,
       swept: false,
@@ -588,6 +589,7 @@ export async function getNewApplicants(
     };
   }
 
+  const mailbox = await gmailVerifiedMailbox();
   const after = gmailAfterClause(sinceIso);
 
   if (ch === "website") {
@@ -835,6 +837,16 @@ export async function sendRecruitingInvite(args: {
   if (!first || !last) throw new Error("first_name and last_name are both required (last name drives dedup).");
 
   // 1. Role must map to a known link — the agent can never send an arbitrary link.
+  //    Out-of-scope roles are refused OUTRIGHT before alias matching, so e.g.
+  //    "Virtual Leasing Agent (Remote)" can never alias into Leasing Agent.
+  if (OUT_OF_SCOPE_ROLES.test(args.role)) {
+    return {
+      sent: false,
+      reason:
+        `Role "${args.role}" is OUT OF SCOPE for invites (Maintenance/VLS/EA/Turn Around are ` +
+        "never invited by this sweep). No email sent.",
+    };
+  }
   const roleKey = normalizeRole(args.role);
   if (!roleKey) {
     return {

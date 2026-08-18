@@ -242,11 +242,20 @@ async function googleAccessToken(mailbox?: string): Promise<string> {
   const cached = cachedGoogleTokens.get(box);
   if (cached && cached.expiresAt - 60 > now) return cached.token;
 
-  // Preferred path: OAuth refresh token (house pattern). One OAuth client,
-  // one refresh token PER MAILBOX (each minted by consenting as that account).
-  const clientId = env("GMAIL_OAUTH_CLIENT_ID");
-  const clientSecret = env("GMAIL_OAUTH_CLIENT_SECRET");
+  // Preferred path: OAuth refresh token (house pattern). One refresh token PER
+  // MAILBOX, and each refresh token is bound to the OAuth CLIENT that minted it:
+  //  - mo@flatfeelandlord.com → GMAIL_OAUTH_CLIENT_ID/SECRET (FFL org project)
+  //  - mo@hazelequity.com     → GMAIL_HAZEL_CLIENT_ID/SECRET (hazel org project
+  //    "hazel-recruiting-sweep" — the FFL consent app is Internal-audience, so
+  //    the hazel account got its own client, 2026-08-18). Falls back to the FFL
+  //    client vars only if the hazel-specific ones are unset.
   const isHazel = box === hazelMailbox();
+  const clientId = isHazel
+    ? env("GMAIL_HAZEL_CLIENT_ID") || env("GMAIL_OAUTH_CLIENT_ID")
+    : env("GMAIL_OAUTH_CLIENT_ID");
+  const clientSecret = isHazel
+    ? env("GMAIL_HAZEL_CLIENT_SECRET") || env("GMAIL_OAUTH_CLIENT_SECRET")
+    : env("GMAIL_OAUTH_CLIENT_SECRET");
   const refreshToken = isHazel ? env("GMAIL_HAZEL_REFRESH_TOKEN") : env("GMAIL_REFRESH_TOKEN");
   if (clientId && clientSecret && refreshToken) {
     const { token, expiresIn } = await refreshGrantToken(clientId, clientSecret, refreshToken);
@@ -255,8 +264,9 @@ async function googleAccessToken(mailbox?: string): Promise<string> {
   }
   if (isHazel) {
     throw new Error(
-      `Gmail for ${box} is not configured: set GMAIL_HAZEL_REFRESH_TOKEN (mint via OAuth ` +
-        "Playground consenting as that account, same client as GMAIL_OAUTH_CLIENT_ID).",
+      `Gmail for ${box} is not configured: set GMAIL_HAZEL_CLIENT_ID, GMAIL_HAZEL_CLIENT_SECRET ` +
+        "and GMAIL_HAZEL_REFRESH_TOKEN (minted via OAuth Playground with the hazel-org client, " +
+        "consenting as that account).",
     );
   }
   if (clientId || clientSecret || refreshToken) {

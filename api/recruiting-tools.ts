@@ -1307,11 +1307,16 @@ function testgorillaCap(): number {
   return Number.isFinite(n) && n > 0 ? n : TESTGORILLA_DEFAULT_CAP;
 }
 
-const TESTGORILLA_TEMPLATE = (first: string) =>
+const TESTGORILLA_TEMPLATE = (first: string, roleDisplay?: string) =>
   [
     `Hi ${first},`,
     "",
-    "Thanks for taking the time to record your video interview for the Virtual Property Manager role at Flat Fee Landlord. We'd like to move you to the next stage of our hiring process: a short skills assessment.",
+    // Mo (2026-08-18 PM): name the role they ACTUALLY applied for — the form
+    // is shared by Virtual PM / VLS / Maintenance since 8/18. When the role
+    // can't be determined, stay neutral rather than guess wrong.
+    `Thanks for taking the time to record your video interview ${
+      roleDisplay ? `for the ${roleDisplay} role at Flat Fee Landlord` : "with Flat Fee Landlord"
+    }. We'd like to move you to the next stage of our hiring process: a short skills assessment.`,
     "",
     `Please complete it here: ${testgorillaLink()}`,
     "",
@@ -1321,9 +1326,35 @@ const TESTGORILLA_TEMPLATE = (first: string) =>
     "Flat Fee Landlord",
   ].join("\n");
 
+/**
+ * Resolve the role the candidate actually applied for (Mo's 2026-08-18 PM
+ * rule: the assessment email names their real role). Priority:
+ *  1. caller-provided role (agent context) → mapped display name;
+ *  2. our own sent VideoAsk invite ("Next step for the <Role> role – …");
+ *  3. undefined → the template falls back to neutral wording.
+ */
+async function resolveTestgorillaRole(email: string, roleArg?: string): Promise<string | undefined> {
+  if (roleArg?.trim()) {
+    const key = normalizeRole(roleArg);
+    if (key && ROLE_LINKS[key]) return ROLE_LINKS[key].display;
+    return roleArg.trim(); // unmapped but explicit — trust the agent's wording
+  }
+  try {
+    const sent = await gmailSearchMessages(`in:sent to:${email} subject:"Next step for the"`, 3);
+    for (const m of sent) {
+      const match = /next step for the (.+?) role/i.exec(m.subject ?? "");
+      if (match?.[1]) return match[1].trim();
+    }
+  } catch {
+    // Role lookup is best-effort — never block the send on it.
+  }
+  return undefined;
+}
+
 export async function sendTestgorillaInvite(args: {
   email: string;
   name: string;
+  role?: string;
   completed_at?: string;
 }): Promise<SendResult> {
   const email = args.email.trim().toLowerCase();
@@ -1375,17 +1406,23 @@ export async function sendTestgorillaInvite(args: {
     };
   }
 
-  // 4. Send (template + link fixed server-side).
-  const messageId = await gmailSendMessage(email, TESTGORILLA_SUBJECT, TESTGORILLA_TEMPLATE(first));
+  // 4. Resolve the role they applied for, then send (template + link fixed
+  //    server-side; wording names their actual role or stays neutral).
+  const roleDisplay = await resolveTestgorillaRole(email, args.role);
+  const messageId = await gmailSendMessage(
+    email,
+    TESTGORILLA_SUBJECT,
+    TESTGORILLA_TEMPLATE(first, roleDisplay),
+  );
 
   // 5. Log BEFORE returning (idempotency across retries).
   log.push({ email });
   await writeStateKey(logKey, [
     ...log.slice(0, -1),
-    { email, name, completed_at: args.completed_at, at: new Date().toISOString(), gmail_message_id: messageId },
+    { email, name, role: roleDisplay, completed_at: args.completed_at, at: new Date().toISOString(), gmail_message_id: messageId },
   ]);
 
-  return { sent: true, to: email, gmail_message_id: messageId, sends_today: log.length };
+  return { sent: true, to: email, role: roleDisplay, gmail_message_id: messageId, sends_today: log.length };
 }
 
 // ───────────────────────── watchdog alert ─────────────────────────

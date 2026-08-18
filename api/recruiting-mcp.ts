@@ -169,13 +169,16 @@ const TOOLS: ToolDef[] = [
       "list are ENFORCED here; if it refuses, accept the refusal. Flow each run: read " +
       "testgorilla_boundary from state → get_videoask_completers since that boundary → this tool " +
       "per completer (OLDEST first) → update testgorilla_boundary to the newest completed_at you " +
-      "actually processed. If the cap is hit, STOP advancing the boundary. Args: { email, name " +
-      "(full name), completed_at? (ISO, for the log) }.",
+      "actually processed. If the cap is hit, STOP advancing the boundary. The email names the " +
+      "role they applied for: pass `role` if you know it from context; otherwise the server " +
+      "recovers it from our own sent invite, and if neither works the wording stays role-neutral " +
+      "(never guesses). Args: { email, name (full name), role?, completed_at? (ISO, for the log) }.",
     inputSchema: {
       type: "object",
       properties: {
         email: { type: "string", description: "Candidate email address." },
         name: { type: "string", description: "Candidate full name (greeting uses the first word)." },
+        role: { type: "string", description: "Role they applied for, if known (free text)." },
         completed_at: { type: "string", description: "When they completed the VideoAsk (ISO)." },
       },
       required: ["email", "name"],
@@ -278,6 +281,7 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<un
       return sendTestgorillaInvite({
         email: str(args, "email"),
         name: str(args, "name"),
+        role: str(args, "role") || undefined,
         completed_at: str(args, "completed_at") || undefined,
       });
     case "send_watchdog_alert":

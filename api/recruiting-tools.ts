@@ -973,18 +973,37 @@ export async function getNewApplicants(
         received_at: m.receivedAt,
         message_id: m.id,
       }));
+    // NEW-POSTING DETECTOR (Mo, 2026-08-18): the per-application email setting
+    // lives on each POSTING, so a newly created job silently reverts to
+    // digest-only until someone flips its checkbox. Digests are returned
+    // separately as a detection signal: any job title appearing in a digest
+    // but sending NO individual emails this window is an unconfigured posting.
+    const digestMsgs = await gmailSearchMessages(
+      `from:no-reply@indeed.com subject:debrief ${after}`,
+      10,
+    );
+    const digests = digestMsgs.map((m) => ({
+      subject: m.subject,
+      body: (m.bodyText || m.snippet).slice(0, 4000),
+      received_at: m.receivedAt,
+    }));
     return {
       channel: ch,
       swept: true,
       mailbox_verified: mailbox,
       hits,
+      digests,
       total: hits.length,
       note:
-        "Individual Indeed application notifications (full body). Extract candidate name, email " +
-        "(relay …@indeedemail.com addresses are valid), and role, then send_recruiting_invite — " +
-        "ALL roles, per Mo's 2026-08-18 ruling. A hit with no extractable candidate email = skip " +
-        "and report it by subject. Daily 'debrief' digests are excluded here and are REDUNDANT — " +
-        "do not carry them forward.",
+        "hits = individual Indeed application notifications (full body). Extract candidate name, " +
+        "email (relay …@indeedemail.com addresses are valid), and role, then send_recruiting_invite " +
+        "— ALL roles, per Mo's 2026-08-18 ruling. A hit with no extractable candidate email = skip " +
+        "and report it by subject. digests = daily debrief summaries, for DETECTION ONLY (never " +
+        "invite from them — they carry no candidate emails): compare the job titles listed in " +
+        "digests against the job titles seen in hits; a job receiving applications in a digest but " +
+        "sending NO individual emails is an UNCONFIGURED posting (its per-application email setting " +
+        "and/or auto-message automation was never enabled — happens whenever a job is newly posted " +
+        "or reposted). Flag it in the Needs-you section by job title.",
     };
   }
 

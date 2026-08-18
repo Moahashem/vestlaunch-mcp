@@ -158,11 +158,11 @@
     },
     {
       "path": "/api/cron/recruiting-sweep",
-      "schedule": "50 11 * * *"
+      "schedule": "30 13 * * *"
     },
     {
       "path": "/api/cron/recruiting-sweep",
-      "schedule": "10 12 * * *"
+      "schedule": "50 13 * * *"
     }
   ]
 }

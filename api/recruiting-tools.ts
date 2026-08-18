@@ -949,6 +949,42 @@ export async function getNewApplicants(
     };
   }
 
+  if (ch === "indeed") {
+    // 2026-08-18 (Mo): Indeed moved to the cloud half. Per-application email
+    // notifications are enabled in the Indeed employer dashboard, so each
+    // apply lands in this inbox with the candidate's details. We intentionally
+    // do NOT rigidly parse the layout (Indeed changes it); return the full
+    // body text and let the agent extract name / email / role. Candidate
+    // emails are usually Indeed RELAY addresses (…@indeedemail.com) — they
+    // forward to the candidate and are valid invite targets.
+    // Digests ("debrief") carry no candidate emails and are excluded.
+    const q = `from:indeed.com ${after} -subject:debrief`;
+    const msgs = await gmailSearchMessages(q, 50);
+    const junk = /debrief|digest|newsletter|billing|receipt|sponsor your job|performance report|invite candidates to apply/i;
+    const hits = msgs
+      .filter((m) => !junk.test(m.subject))
+      .map((m) => ({
+        from: m.from,
+        subject: m.subject,
+        body: (m.bodyText || m.snippet).slice(0, 4000),
+        received_at: m.receivedAt,
+        message_id: m.id,
+      }));
+    return {
+      channel: ch,
+      swept: true,
+      mailbox_verified: mailbox,
+      hits,
+      total: hits.length,
+      note:
+        "Individual Indeed application notifications (full body). Extract candidate name, email " +
+        "(relay …@indeedemail.com addresses are valid), and role, then send_recruiting_invite — " +
+        "ALL roles, per Mo's 2026-08-18 ruling. A hit with no extractable candidate email = skip " +
+        "and report it by subject. Daily 'debrief' digests are excluded here and are REDUNDANT — " +
+        "do not carry them forward.",
+    };
+  }
+
   if (ch === "true_analysis") {
     const q = `in:inbox ${after} (subject:Fwd OR subject:FW OR resume OR applicant OR application OR applying OR candidate OR hiring)`;
     const msgs = await gmailSearchMessages(q, 50);
@@ -973,7 +1009,7 @@ export async function getNewApplicants(
   }
 
   throw new Error(
-    `Unknown channel "${channel}". Valid: website, wix, wizehire, true_analysis, hazelequity.`,
+    `Unknown channel "${channel}". Valid: website, wix, wizehire, indeed, true_analysis, hazelequity.`,
   );
 }
 

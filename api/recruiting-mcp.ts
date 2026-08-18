@@ -108,6 +108,8 @@ const TOOLS: ToolDef[] = [
       "Run one recruiting email channel's SOP sweep and return parsed applicants. Channels: " +
       "'website' (Careers Application leads), 'wix' (contact-form submissions — often NOT " +
       "applicants, judge each), 'wizehire' (30-day minimum window enforced; ACD = our ACM role), " +
+      "'indeed' (individual Indeed application notifications with FULL body — extract candidate " +
+      "name/email/role yourself; relay …@indeedemail.com addresses are valid invite targets), " +
       "'true_analysis' (broad catch-all — returns {from, subject, snippet} hits for you to eyeball), " +
       "'hazelequity' (mo@hazelequity.com catch-all; if it returns swept:false it is UNSWEPT — report " +
       "that, never 'zero applicants'). Every swept result includes mailbox_verified so an " +
@@ -117,7 +119,7 @@ const TOOLS: ToolDef[] = [
       properties: {
         channel: {
           type: "string",
-          description: "'website' | 'wix' | 'wizehire' | 'true_analysis' | 'hazelequity'",
+          description: "'website' | 'wix' | 'wizehire' | 'indeed' | 'true_analysis' | 'hazelequity'",
         },
         since_iso: { type: "string", description: "ISO timestamp — start of the sweep window." },
       },

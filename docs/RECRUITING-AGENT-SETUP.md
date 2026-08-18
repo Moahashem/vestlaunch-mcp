@@ -12,6 +12,8 @@ The email half of the recruiting invite sweep, moved off Mo's Mac onto Anthropic
 | `GMAIL_OAUTH_CLIENT_ID` / `GMAIL_OAUTH_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | The HOUSE Gmail pattern (same as ffl-crm lib/gmail.ts): an OAuth client in the Google Cloud project + a refresh token Mo minted by consenting once as mo@flatfeelandlord.com (setup below). Preferred — the org policy `iam.disableServiceAccountKeyCreation` blocks SA key files. | NEW |
 | `GOOGLE_SA_KEY_JSON` | Fallback only: service-account JSON key with domain-wide delegation. UNUSABLE today (org policy); kept for a future keyless/WIF migration. | fallback |
 | `GMAIL_IMPERSONATE` | Expected mailbox for verification + From; defaults to `mo@flatfeelandlord.com`. | optional |
+| `GMAIL_HAZEL_REFRESH_TOKEN` | Second refresh token, minted by consenting as **mo@hazelequity.com** (same OAuth client, same Playground flow as setup A). Unlocks the hazelequity channel from the cloud — until set, that channel honestly reports UNSWEPT. | NEW (2026-08-18) |
+| `GMAIL_HAZEL_MAILBOX` | Defaults to `mo@hazelequity.com`. | optional |
 | `ZAPIER_RECRUITING_MCP_URL` | URL of the **dedicated** recruiting Zapier MCP server (setup below). VideoAsk only. | NEW |
 | `ZAPIER_RECRUITING_MCP_TOKEN` | Only if that server uses a separate Bearer (most Zapier MCP URLs are self-authing). | optional |
 | `VIDEOASK_ORG_ID` | Defaults to the FFL org `94dc21de-…853e3`. | optional |
@@ -66,6 +68,17 @@ Why: VideoAsk's direct API is OAuth-only with 24h tokens; Zapier already holds a
 - Seed state once: `last_run_cloud`, `last_run_browser`, `carry_forward`, `testgorilla_boundary` (= `2026-07-19T18:58` Alfredo Enciso) from the Drive `RECRUITING-STATE.md`, then retire the Drive file (SOP pointer update).
 - Edit the browser half's local task prompt to read/write the same Workforce state (its local vestlaunch MCP already has `vestlaunch_get/set_agent_state`) instead of the Drive file — otherwise the >3-day watchdog reads a stale date.
 - Remove `recruiting-sweep-cloud` from the Mac's local scheduler once the cron has produced 2–3 good unattended runs.
+
+## Update 2026-08-18 — ALL roles invited (Mo's ruling; supersedes the out-of-scope list)
+
+The 2026-08-17 out-of-scope list (Maintenance/VLS/EA/Turn Around refused outright) is retired.
+Mo ruled "I'd ideally want all roles invited." New role→link map entries (links read live from
+the VideoAsk org share dialogs): **Executive Assistant** → `fiq0psnh2`, **Virtual Sales
+Rep/Executive** → `f4gfnq3ly`, **Virtual PM / Virtual Leasing Specialist / Maintenance
+Coordinator** → `f4k09mehb` (no dedicated questionnaires exist for VLS/Maintenance — Mo chose
+the Virtual PM questionnaire for both; the email still names the candidate's actual role).
+Unmappable roles still fail closed: the send tool refuses and the agent reports them by name.
+The hazelequity channel became cloud-sweepable the same day via `GMAIL_HAZEL_REFRESH_TOKEN`.
 
 ## Never
 

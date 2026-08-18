@@ -22,9 +22,11 @@
  *      GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET / GMAIL_REFRESH_TOKEN
  *      GOOGLE_SA_KEY_JSON   — fallback only (unusable under current org policy)
  *      GMAIL_IMPERSONATE    — expected mailbox (default mo@flatfeelandlord.com)
- *  - VideoAsk: via the DEDICATED recruiting Zapier MCP server (raw GET action).
+ *  - VideoAsk: via the DEDICATED recruiting Zapier MCP server (raw GET action,
+ *    verified live 2026-08-18: server "ffl-recruiting", tool
+ *    videoask_make_api_get_request, envelope {"results":[{status,headers,body}]}).
  *    VideoAsk's direct API is OAuth-only with 24h tokens; Zapier already holds
- *    and refreshes that OAuth (connection verified 2026-08-17).
+ *    and refreshes that OAuth.
  *      ZAPIER_RECRUITING_MCP_URL   — the dedicated server's MCP URL
  *      ZAPIER_RECRUITING_MCP_TOKEN — optional Bearer if the URL is not self-authing
  *      ZAPIER_VIDEOASK_GET_TOOL    — tool name (default videoask_make_api_get_request)
@@ -37,9 +39,10 @@
  *  - Role → VideoAsk link map is HARD-CODED here; the agent can never send an
  *    arbitrary link or an off-template body. Out-of-scope roles (Maintenance/
  *    VLS/EA/Turn Around) are refused outright before alias matching.
- *  - Dedup is ENFORCED in the tool: Gmail `in:sent to:<email>` AND VideoAsk
- *    Contacts search by LAST NAME (Golden Rule 1 — name, not email; the Rocky
- *    Garza case). A match refuses the send and returns the evidence.
+ *  - Dedup is ENFORCED in the tool: Gmail `in:sent to:<email>` AND the
+ *    all-forms VideoAsk contact index searched by LAST NAME (Golden Rule 1 —
+ *    name, not email; the Rocky Garza case). A match refuses the send and
+ *    returns the evidence.
  *  - Denylist (Joel Sandoval), per-day send cap (RECRUITING_SEND_CAP, default
  *    15), and a per-day sent log in workforce state give idempotency across
  *    retries: the same address can never be emailed twice in a day.
@@ -436,7 +439,16 @@ async function zapierToolCall(toolName: string, args: Record<string, unknown>): 
   return textOut;
 }
 
-/** Peel Zapier's wrapping until we reach the raw VideoAsk JSON response. */
+/**
+ * Peel Zapier's wrapping until we reach the raw VideoAsk JSON response.
+ * VERIFIED envelope (live capture 2026-08-18):
+ *   {"results":[{"status":200,"headers":{...},"body":{ <VideoAsk JSON> }}]}
+ * and on failure: {"isError":true,"error":"... status code 404","billingTasksUsed":0}
+ * The results[0] unwrap fires ONLY when the element looks like that HTTP
+ * envelope (has status+body) — VideoAsk's own payload ALSO uses a `results`
+ * key ({next, previous, results:[records]}), and a page with exactly one
+ * record must never be mistaken for a wrapper.
+ */
 function unpeelZapierJson(text: string): unknown {
   let v: unknown = text;
   for (let i = 0; i < 5; i++) {
@@ -452,15 +464,18 @@ function unpeelZapierJson(text: string): unknown {
     }
     if (v && typeof v === "object" && !Array.isArray(v)) {
       const o = v as Record<string, unknown>;
-      if (o.results !== undefined && Array.isArray(o.results) && o.results.length === 1) {
-        v = o.results[0];
-        continue;
+      if (Array.isArray(o.results) && o.results.length >= 1) {
+        const first = o.results[0] as Record<string, unknown> | undefined;
+        if (first && typeof first === "object" && "status" in first && "body" in first) {
+          v = first;
+          continue;
+        }
       }
       if (o.response !== undefined) {
         v = o.response;
         continue;
       }
-      if (o.body !== undefined && o.contents === undefined && o.results === undefined) {
+      if (o.body !== undefined && o.contents === undefined && !Array.isArray(o.results)) {
         v = o.body;
         continue;
       }
@@ -478,7 +493,18 @@ async function videoaskGet(pathAndQuery: string): Promise<Record<string, unknown
   if (!parsed || typeof parsed !== "object") {
     throw new Error(`VideoAsk GET ${pathAndQuery} returned non-object: ${String(out).slice(0, 200)}`);
   }
-  return parsed as Record<string, unknown>;
+  const obj = parsed as Record<string, unknown>;
+  // An upstream error must THROW, never read as "no results" — a 404 that
+  // looks like an empty list is the silent-failure mode this sweep exists to
+  // kill (and callers like the send tool fail CLOSED on a throw).
+  if (obj.isError === true || (typeof obj.error === "string" && obj.error)) {
+    throw new Error(`VideoAsk GET ${pathAndQuery} failed upstream: ${String(obj.error).slice(0, 200)}`);
+  }
+  const status = typeof obj.status === "number" ? obj.status : undefined;
+  if (status !== undefined && (status < 200 || status >= 300)) {
+    throw new Error(`VideoAsk GET ${pathAndQuery} → HTTP ${status}`);
+  }
+  return obj;
 }
 
 export interface Completer {
@@ -490,6 +516,7 @@ export interface Completer {
 /**
  * get_videoask_completers — pages the answers endpoint newest-first and STRIPS
  * each ~5k-token record down to {name, email, completed_at} server-side.
+ * (Payload key verified live 2026-08-18: {next, previous, results:[records]}.)
  */
 export async function getVideoaskCompleters(
   questionId: string | undefined,
@@ -507,7 +534,7 @@ export async function getVideoaskCompleters(
   while (pages < MAX_VIDEOASK_PAGES) {
     const page = await videoaskGet(`/questions/${qid}/answers?limit=25&offset=${offset}`);
     pages += 1;
-    const contents = (page.contents ?? page.answers ?? page.results ?? []) as Array<
+    const contents = (page.results ?? page.contents ?? page.answers ?? []) as Array<
       Record<string, unknown>
     >;
     if (!Array.isArray(contents) || contents.length === 0) break;
@@ -540,28 +567,121 @@ export interface ContactHit {
   name: string;
   email: string;
   created_at: string;
+  form?: string;
 }
 
 /**
- * search_videoask_contacts — the live Contacts-by-surname dedup check
- * (Golden Rule 1: dedup by NAME, not email — the Rocky Garza case).
+ * VideoAsk contact index — the dedup source of truth.
+ *
+ * VERIFIED LIVE 2026-08-18: there is NO org-wide contacts-search endpoint in
+ * the API (all candidate paths 404), and on /forms/{id}/contacts the `search`,
+ * `q` and `name` params are silently IGNORED (same trap as `fields` on
+ * answers). Only `?email=` filters server-side — and email-only dedup is
+ * exactly what Golden Rule 1 forbids (the Rocky Garza case).
+ *
+ * So the tool builds its own index: page the contacts of EVERY form in the
+ * org (14 forms — broader than the manual UI check or the old single-form CSV
+ * export ever was), keep only {name, email, created_at, form}, and cache it in
+ * Workforce state. Rebuilt automatically when older than 12h, so the morning
+ * run always searches an index minutes old. The index key is HIDDEN from
+ * get_recruiting_state (thousands of rows must never enter the agent's
+ * context) and reserved against update_recruiting_state.
  */
-export async function searchVideoaskContacts(query: string): Promise<ContactHit[]> {
-  const q = query.trim();
+const CONTACT_INDEX_KEY = "videoask_contact_index";
+const CONTACT_INDEX_MAX_AGE_MS = 12 * 3600 * 1000;
+const CONTACT_PAGE_LIMIT = 100;
+const MAX_CONTACT_PAGES_PER_FORM = 40;
+
+interface ContactIndex {
+  updated_at: string;
+  total: number;
+  forms: number;
+  contacts: Array<{ n: string; e: string; c: string; f: string }>;
+}
+
+async function listVideoaskForms(): Promise<Array<{ form_id: string; title: string }>> {
+  const page = await videoaskGet(`/forms?limit=100`);
+  const forms = (page.results ?? page.contents ?? []) as Array<Record<string, unknown>>;
+  if (!Array.isArray(forms) || forms.length === 0) {
+    throw new Error("VideoAsk /forms returned no forms — refusing to build an empty dedup index.");
+  }
+  return forms.map((f) => ({
+    form_id: String(f.form_id ?? f.id ?? ""),
+    title: String(f.title ?? "").trim(),
+  })).filter((f) => f.form_id);
+}
+
+async function fetchFormContacts(form: { form_id: string; title: string }): Promise<ContactIndex["contacts"]> {
+  const out: ContactIndex["contacts"] = [];
+  for (let pageNo = 0; pageNo < MAX_CONTACT_PAGES_PER_FORM; pageNo++) {
+    const page = await videoaskGet(
+      `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=${pageNo * CONTACT_PAGE_LIMIT}`,
+    );
+    const recs = (page.results ?? page.contents ?? []) as Array<Record<string, unknown>>;
+    if (!Array.isArray(recs) || recs.length === 0) break;
+    for (const r of recs) {
+      out.push({
+        n: String(r.name ?? r.contact_name ?? "").trim().toLowerCase(),
+        e: String(r.email ?? r.contact_email ?? "").trim().toLowerCase(),
+        c: String(r.created_at ?? ""),
+        f: form.title,
+      });
+    }
+    if (recs.length < CONTACT_PAGE_LIMIT || !page.next) break;
+  }
+  return out;
+}
+
+async function getContactIndex(): Promise<ContactIndex> {
+  const cached = (await readStateKey(CONTACT_INDEX_KEY)) as ContactIndex | undefined;
+  if (
+    cached &&
+    Array.isArray(cached.contacts) &&
+    cached.contacts.length > 0 &&
+    Date.now() - Date.parse(cached.updated_at ?? "") < CONTACT_INDEX_MAX_AGE_MS
+  ) {
+    return cached;
+  }
+  const forms = await listVideoaskForms();
+  // Parallel across forms; pages within a form are sequential.
+  const perForm = await Promise.all(forms.map((f) => fetchFormContacts(f)));
+  const contacts = perForm.flat();
+  if (contacts.length === 0) {
+    throw new Error("VideoAsk contact-index rebuild returned 0 contacts — refusing to dedup against nothing.");
+  }
+  const index: ContactIndex = {
+    updated_at: new Date().toISOString(),
+    total: contacts.length,
+    forms: forms.length,
+    contacts,
+  };
+  await writeStateKey(CONTACT_INDEX_KEY, index);
+  return index;
+}
+
+/**
+ * search_videoask_contacts — name/email dedup against the all-forms contact
+ * index (Golden Rule 1: dedup by NAME, not email — the Rocky Garza case).
+ */
+export async function searchVideoaskContacts(query: string): Promise<{
+  hits: ContactHit[];
+  index_updated_at: string;
+  index_total: number;
+  index_forms: number;
+}> {
+  const q = query.trim().toLowerCase();
   if (!q) throw new Error("query is required (usually the candidate's last name).");
-  const orgId = env("VIDEOASK_ORG_ID") || VIDEOASK_ORG_ID_DEFAULT;
-  const template =
-    env("VIDEOASK_CONTACTS_PATH") || `/organizations/{org_id}/contacts?search={query}&limit=25`;
-  const path = template.replace("{org_id}", orgId).replace("{query}", encodeURIComponent(q));
-  const page = await videoaskGet(path);
-  const contents = (page.contents ?? page.contacts ??
-    page.results ?? []) as Array<Record<string, unknown>>;
-  if (!Array.isArray(contents)) return [];
-  return contents.map((c) => ({
-    name: String(c.name ?? c.contact_name ?? "").trim(),
-    email: String(c.email ?? c.contact_email ?? "").trim().toLowerCase(),
-    created_at: String(c.created_at ?? ""),
-  }));
+  const index = await getContactIndex();
+  const hits = index.contacts
+    .filter((c) => c.n.includes(q) || c.e.includes(q))
+    .slice(0, 50)
+    .map((c) => ({ name: c.n, email: c.e, created_at: c.c, form: c.f }));
+  return {
+    hits,
+    index_updated_at: index.updated_at,
+    index_total: index.total,
+    index_forms: index.forms,
+  };
 }
 
 // ───────────────────────── get_new_applicants ─────────────────────────
@@ -809,7 +929,19 @@ export async function getRecruitingState(): Promise<Record<string, unknown>> {
   const rows = (res.data ?? []) as Array<{ key?: string; value?: unknown; updatedAt?: string }>;
   const state: Record<string, unknown> = {};
   if (Array.isArray(rows)) {
-    for (const r of rows) if (r?.key) state[r.key] = r.value;
+    for (const r of rows) {
+      if (!r?.key) continue;
+      // The contact index is thousands of rows — summarize it, never inline it
+      // into the agent's context.
+      if (r.key === CONTACT_INDEX_KEY) {
+        const idx = r.value as ContactIndex | undefined;
+        state[r.key] = idx
+          ? { updated_at: idx.updated_at, total: idx.total, forms: idx.forms, note: "dedup index (hidden; used internally by send/search tools)" }
+          : undefined;
+        continue;
+      }
+      state[r.key] = r.value;
+    }
   }
   return { agentKey: AGENT_STATE_KEY, state };
 }
@@ -817,8 +949,8 @@ export async function getRecruitingState(): Promise<Record<string, unknown>> {
 export async function updateRecruitingState(key: string, value: unknown): Promise<Record<string, unknown>> {
   const k = key.trim();
   if (!k) throw new Error("key is required.");
-  if (/^(sent_|watchdog_sent_)/.test(k)) {
-    throw new Error(`key "${k}" is reserved for the send tool's internal logs.`);
+  if (/^(sent_|watchdog_sent_|videoask_contact_index)/.test(k)) {
+    throw new Error(`key "${k}" is reserved for the tools' internal logs/index.`);
   }
   await crmStateRequest("POST", undefined, { agentKey: AGENT_STATE_KEY, key: k, value });
   return { saved: true, agentKey: AGENT_STATE_KEY, key: k };
@@ -942,18 +1074,20 @@ export async function sendRecruitingInvite(args: {
     };
   }
 
-  // 5. Dedup — VideoAsk Contacts by LAST NAME (Golden Rule 1; email-only checks
-  //    re-invite people like Rocky Garza who completed under a different email).
+  // 5. Dedup — VideoAsk contact index by LAST NAME (Golden Rule 1; email-only
+  //    checks re-invite people like Rocky Garza who completed under a
+  //    different email).
   let contactHits: ContactHit[] = [];
   try {
-    contactHits = await searchVideoaskContacts(last);
+    const res = await searchVideoaskContacts(last);
+    contactHits = res.hits;
   } catch (err) {
     // Fail CLOSED on dedup: if the contacts check is down we refuse to send
     // rather than risk a duplicate (the exact Trevon Oliver failure mode).
     return {
       sent: false,
       reason:
-        `VideoAsk Contacts dedup check failed (${err instanceof Error ? err.message : String(err)}). ` +
+        `VideoAsk contacts dedup check failed (${err instanceof Error ? err.message : String(err)}). ` +
         "Refusing to send without it — retry later or ask Mo.",
     };
   }
@@ -968,7 +1102,7 @@ export async function sendRecruitingInvite(args: {
     return {
       sent: false,
       reason:
-        `Dedup: VideoAsk Contacts already has "${first} ${last}" (matched by name/email). ` +
+        `Dedup: VideoAsk contacts already include "${first} ${last}" (matched by name/email). ` +
         "They have interacted with a questionnaire before. No email sent.",
       evidence: nameMatch,
     };

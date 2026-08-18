@@ -109,8 +109,8 @@ const TOOLS: ToolDef[] = [
       "'website' (Careers Application leads), 'wix' (contact-form submissions — often NOT " +
       "applicants, judge each), 'wizehire' (30-day minimum window enforced; ACD = our ACM role), " +
       "'true_analysis' (broad catch-all — returns {from, subject, snippet} hits for you to eyeball), " +
-      "'hazelequity' (always returns swept:false — that inbox is unreachable from the cloud; report " +
-      "it as UNSWEPT, never as zero applicants). Every swept result includes mailbox_verified so an " +
+      "'hazelequity' (mo@hazelequity.com catch-all; if it returns swept:false it is UNSWEPT — report " +
+      "that, never 'zero applicants'). Every swept result includes mailbox_verified so an " +
       "empty list is trustworthy. Args: { channel, since_iso }.",
     inputSchema: {
       type: "object",
@@ -132,8 +132,12 @@ const TOOLS: ToolDef[] = [
       "role→link mapping are fixed server-side; dedup (Gmail in:sent + VideoAsk contacts by last " +
       "name), the do-not-contact list, a per-day cap, and same-day idempotency are ENFORCED here — " +
       "if the tool refuses, accept the refusal and report it (do not retry with altered names). " +
-      "Roles: Regional Manager, Community/Apartment Manager, Assistant Community Manager (Wizehire " +
-      "'Assistant Community Director' = this), Leasing Agent, BD/Sales Manager. Args: { email, " +
+      "Roles (ALL invitable since 2026-08-18, Mo's ruling): Regional Manager, Community/Apartment " +
+      "Manager, Assistant Community Manager (Wizehire 'Assistant Community Director' = this), " +
+      "Leasing Agent, BD/Sales Manager, Executive Assistant, Virtual Sales Rep/Executive, Virtual " +
+      "PM, Virtual Leasing Specialist, Maintenance Coordinator (the last three share the Virtual PM " +
+      "questionnaire — server-mapped). A role the server cannot map is refused — report it by name. " +
+      "Args: { email, " +
       "first_name, last_name, role, personal_note? (short phrase from their background, e.g. " +
       "'five years of leasing experience' — used as: Your <note> really stood out.) }.",
     inputSchema: {

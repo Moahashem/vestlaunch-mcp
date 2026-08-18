@@ -109,11 +109,46 @@ const ROLE_LINKS: Record<string, RoleDef> = {
     display: "Sales Manager",
     link: "https://www.videoask.com/fhzg3ayze",
   },
+  // ── Added 2026-08-18 — Mo's ruling: "I'd ideally want all roles invited."
+  //    Supersedes the 2026-08-17 out-of-scope list. Links read live from the
+  //    VideoAsk org (share dialogs, app.videoask.com) on 2026-08-18.
+  executive_assistant: {
+    display: "Executive Assistant",
+    link: "https://www.videoask.com/fiq0psnh2", // "Flat Fee Landlord Executive Assistant"
+  },
+  virtual_sales: {
+    display: "Virtual Sales Representative",
+    link: "https://www.videoask.com/f4gfnq3ly", // "Sales Representative Virtual"
+  },
+  virtual_pm: {
+    display: "Virtual Property Manager",
+    link: "https://www.videoask.com/f4k09mehb", // "Virtual PM Flat Fee Landlord"
+  },
+  // No dedicated questionnaire exists for these two — Mo ruled (2026-08-18)
+  // both get the Virtual PM questionnaire. The invite email still names the
+  // role the candidate actually applied for; only the link is shared.
+  virtual_leasing_specialist: {
+    display: "Virtual Leasing Specialist",
+    link: "https://www.videoask.com/f4k09mehb",
+  },
+  maintenance_coordinator: {
+    display: "Maintenance Coordinator",
+    link: "https://www.videoask.com/f4k09mehb",
+  },
 };
 
 /** Loose aliases → canonical role key. */
 function normalizeRole(raw: string): string | null {
   const s = raw.toLowerCase().replace(/[^a-z]+/g, " ").trim();
+  // ── 2026-08-18 roles FIRST — order is load-bearing. Each of these would
+  //    otherwise mis-alias into an older pattern below: "virtual leasing" into
+  //    leasing_agent, "virtual sales" into bd_sales_manager, and "virtual
+  //    property manager" into community_manager via /property manager/.
+  if (/maintenance/.test(s)) return "maintenance_coordinator";
+  if (/executive assistant|(^|\s)ea(\s|$)/.test(s)) return "executive_assistant";
+  if (/virtual leasing|(^|\s)vls(\s|$)/.test(s)) return "virtual_leasing_specialist";
+  if (/virtual sales|sales representative|(^|\s)vse(\s|$)/.test(s)) return "virtual_sales";
+  if (/virtual pm|virtual property|(^|\s)vpm(\s|$)/.test(s)) return "virtual_pm";
   if (/regional/.test(s)) return "regional_manager";
   if (/assistant.*(community|director|manager)|(^|\s)acm(\s|$)|(^|\s)acd(\s|$)/.test(s))
     return "assistant_community_manager";
@@ -134,7 +169,8 @@ interface GoogleSaKey {
   private_key: string;
 }
 
-let cachedGoogleToken: { token: string; expiresAt: number } | null = null;
+/** Access tokens cached per mailbox (2026-08-18: hazelequity joined the cloud sweep). */
+const cachedGoogleTokens = new Map<string, { token: string; expiresAt: number }>();
 
 function loadSaKey(): GoogleSaKey {
   const raw = env("GOOGLE_SA_KEY_JSON");
@@ -163,6 +199,12 @@ function b64url(input: Buffer | string): string {
 
 export function gmailImpersonatedUser(): string {
   return env("GMAIL_IMPERSONATE") || GMAIL_DEFAULT_IMPERSONATE;
+}
+
+/** The hazelequity mailbox (channel 2). Sweepable from the cloud once Mo mints
+ *  a refresh token for it (GMAIL_HAZEL_REFRESH_TOKEN, same OAuth client). */
+export function hazelMailbox(): string {
+  return (env("GMAIL_HAZEL_MAILBOX") || "mo@hazelequity.com").toLowerCase();
 }
 
 /**
@@ -194,18 +236,28 @@ async function refreshGrantToken(clientId: string, clientSecret: string, refresh
   return { token: body.access_token, expiresIn: body.expires_in ?? 3600 };
 }
 
-async function googleAccessToken(): Promise<string> {
+async function googleAccessToken(mailbox?: string): Promise<string> {
+  const box = (mailbox ?? gmailImpersonatedUser()).toLowerCase();
   const now = Math.floor(Date.now() / 1000);
-  if (cachedGoogleToken && cachedGoogleToken.expiresAt - 60 > now) return cachedGoogleToken.token;
+  const cached = cachedGoogleTokens.get(box);
+  if (cached && cached.expiresAt - 60 > now) return cached.token;
 
-  // Preferred path: OAuth refresh token (house pattern).
+  // Preferred path: OAuth refresh token (house pattern). One OAuth client,
+  // one refresh token PER MAILBOX (each minted by consenting as that account).
   const clientId = env("GMAIL_OAUTH_CLIENT_ID");
   const clientSecret = env("GMAIL_OAUTH_CLIENT_SECRET");
-  const refreshToken = env("GMAIL_REFRESH_TOKEN");
+  const isHazel = box === hazelMailbox();
+  const refreshToken = isHazel ? env("GMAIL_HAZEL_REFRESH_TOKEN") : env("GMAIL_REFRESH_TOKEN");
   if (clientId && clientSecret && refreshToken) {
     const { token, expiresIn } = await refreshGrantToken(clientId, clientSecret, refreshToken);
-    cachedGoogleToken = { token, expiresAt: now + expiresIn };
+    cachedGoogleTokens.set(box, { token, expiresAt: now + expiresIn });
     return token;
+  }
+  if (isHazel) {
+    throw new Error(
+      `Gmail for ${box} is not configured: set GMAIL_HAZEL_REFRESH_TOKEN (mint via OAuth ` +
+        "Playground consenting as that account, same client as GMAIL_OAUTH_CLIENT_ID).",
+    );
   }
   if (clientId || clientSecret || refreshToken) {
     throw new Error(
@@ -251,12 +303,12 @@ async function googleAccessToken(): Promise<string> {
   }
   const body = JSON.parse(text) as { access_token?: string; expires_in?: number };
   if (!body.access_token) throw new Error("Google token exchange returned no access_token.");
-  cachedGoogleToken = { token: body.access_token, expiresAt: now + (body.expires_in ?? 3600) };
+  cachedGoogleTokens.set(box, { token: body.access_token, expiresAt: now + (body.expires_in ?? 3600) });
   return body.access_token;
 }
 
-async function gmailFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-  const token = await googleAccessToken();
+async function gmailFetch<T = unknown>(path: string, init?: RequestInit, mailbox?: string): Promise<T> {
+  const token = await googleAccessToken(mailbox);
   const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
     ...init,
     headers: {
@@ -274,10 +326,10 @@ async function gmailFetch<T = unknown>(path: string, init?: RequestInit): Promis
  * SOP hard rule: "an empty result is never proof of 'nothing new' until you
  * have confirmed which inbox answered."
  */
-export async function gmailVerifiedMailbox(): Promise<string> {
-  const profile = await gmailFetch<{ emailAddress?: string }>("/profile");
+export async function gmailVerifiedMailbox(expectedMailbox?: string): Promise<string> {
+  const expected = (expectedMailbox ?? gmailImpersonatedUser()).toLowerCase();
+  const profile = await gmailFetch<{ emailAddress?: string }>("/profile", undefined, expected);
   const addr = (profile.emailAddress ?? "").toLowerCase();
-  const expected = gmailImpersonatedUser().toLowerCase();
   if (addr !== expected) {
     throw new Error(`Gmail mailbox mismatch: expected ${expected}, API answered as "${addr}".`);
   }
@@ -337,13 +389,19 @@ function extractBodyText(payload: Record<string, unknown> | undefined): string {
   return "";
 }
 
-async function gmailSearchMessages(q: string, cap = MAX_GMAIL_MESSAGES_PER_CHANNEL): Promise<GmailMessageMeta[]> {
+async function gmailSearchMessages(
+  q: string,
+  cap = MAX_GMAIL_MESSAGES_PER_CHANNEL,
+  mailbox?: string,
+): Promise<GmailMessageMeta[]> {
   const list = await gmailFetch<{ messages?: Array<{ id: string; threadId: string }> }>(
     `/messages?q=${encodeURIComponent(q)}&maxResults=${cap}`,
+    undefined,
+    mailbox,
   );
   const out: GmailMessageMeta[] = [];
   for (const m of (list.messages ?? []).slice(0, cap)) {
-    const full = await gmailFetch<Record<string, unknown>>(`/messages/${m.id}?format=full`);
+    const full = await gmailFetch<Record<string, unknown>>(`/messages/${m.id}?format=full`, undefined, mailbox);
     const payload = full.payload as Record<string, unknown> | undefined;
     const headers = (payload?.headers as Array<{ name?: string; value?: string }>) ?? [];
     const internalDate = Number(full.internalDate ?? 0);
@@ -727,14 +785,13 @@ function extractEmail(text: string): string {
   return (m?.[0] ?? "").toLowerCase();
 }
 
-const OUT_OF_SCOPE_ROLES =
-  /(maintenance|virtual\s+leasing|vls|executive\s+assistant|(^|\s)ea(\s|$)|turn\s*around)/i;
-
+// 2026-08-18: the blanket OUT_OF_SCOPE refusal (Maintenance/VLS/EA/Turn Around,
+// Mo's 2026-08-17 list) is RETIRED — Mo ruled "I'd ideally want all roles
+// invited." Every role that maps in ROLE_LINKS is now invitable; roles the
+// server cannot map still fail CLOSED (role_key null → the send tool refuses
+// and the agent reports them by name instead of guessing a link).
 function classifyRole(rawRole: string): { role_key: string | null; in_scope: boolean } {
-  if (OUT_OF_SCOPE_ROLES.test(rawRole)) return { role_key: null, in_scope: false };
   const key = normalizeRole(rawRole);
-  // 4 apartment roles + BD/Sales Manager (Mo's 2026-08-17 ruling: website
-  // BD/Sales leads DO get invited with fhzg3ayze).
   return { role_key: key, in_scope: key !== null };
 }
 
@@ -745,16 +802,40 @@ export async function getNewApplicants(
   const ch = channel.trim().toLowerCase();
 
   if (ch === "hazelequity") {
-    // Deliberately unswept in the cloud half: the connector/service account is
-    // flatfeelandlord-only. NEVER report this as "zero applicants". (Checked
-    // BEFORE the mailbox verification — this channel needs no Gmail at all.)
+    // 2026-08-18: sweepable from the cloud once GMAIL_HAZEL_REFRESH_TOKEN is
+    // set (house OAuth pattern, second refresh token on the same client).
+    // Until then it stays honestly UNSWEPT — never "zero applicants".
+    if (!env("GMAIL_HAZEL_REFRESH_TOKEN")) {
+      return {
+        channel: ch,
+        swept: false,
+        reason:
+          `${hazelMailbox()} is not yet reachable from the cloud half — GMAIL_HAZEL_REFRESH_TOKEN ` +
+          "is not set. Report it as UNSWEPT, not as zero applicants.",
+      };
+    }
+    const hazelBox = await gmailVerifiedMailbox(hazelMailbox());
+    const hazelAfter = gmailAfterClause(sinceIso);
+    // Broad catch-all like true_analysis — this inbox has no structured
+    // applicant notifications, so return hits for the agent to judge.
+    const q = `in:inbox ${hazelAfter} (subject:Fwd OR subject:FW OR resume OR applicant OR application OR applying OR candidate OR hiring OR career)`;
+    const msgs = await gmailSearchMessages(q, 50, hazelBox);
+    const hits: TrueAnalysisHit[] = msgs.map((m) => ({
+      from: m.from,
+      subject: m.subject,
+      snippet: m.snippet.slice(0, 300),
+      received_at: m.receivedAt,
+      message_id: m.id,
+    }));
     return {
       channel: ch,
-      swept: false,
-      reason:
-        "mo@hazelequity.com is not reachable from the cloud half (no Gmail credential for that " +
-        "account). Report it as UNSWEPT, not as zero applicants. It is read in Chrome Gmail u/1 " +
-        "by the browser half / Mo.",
+      swept: true,
+      mailbox_verified: hazelBox,
+      hits,
+      total: hits.length,
+      note:
+        "hazelequity catch-all sweep — judge every hit; this inbox has historically produced " +
+        "zero applicants, so an empty list is plausible (and now trustworthy: mailbox verified).",
     };
   }
 
@@ -824,10 +905,8 @@ export async function getNewApplicants(
       const match = body.match(/(.+?)\s+has started an application for\s+(.+?)\s+in\s+/i);
       const name = match?.[1]?.trim() ?? "";
       const roleRaw = match?.[2]?.trim() ?? m.subject.replace(/\s*Completed\s*$/i, "").trim();
-      if (/executive assistant/i.test(roleRaw) || /executive assistant/i.test(m.subject)) {
-        skipped.push({ subject: m.subject, reason: "Executive Assistant — not one of our roles" });
-        continue;
-      }
+      // (2026-08-18: the Executive Assistant skip is gone — EA applicants are
+      // now invited to the Flat Fee Landlord Executive Assistant questionnaire.)
       if (!name && !extractEmail(body)) {
         skipped.push({ subject: m.subject, reason: "not an applicant notification (marketing/other)" });
         continue;
@@ -1017,22 +1096,16 @@ export async function sendRecruitingInvite(args: {
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error(`"${args.email}" is not a valid email.`);
   if (!first || !last) throw new Error("first_name and last_name are both required (last name drives dedup).");
 
-  // 1. Role must map to a known link — the agent can never send an arbitrary link.
-  //    Out-of-scope roles are refused OUTRIGHT before alias matching, so e.g.
-  //    "Virtual Leasing Agent (Remote)" can never alias into Leasing Agent.
-  if (OUT_OF_SCOPE_ROLES.test(args.role)) {
-    return {
-      sent: false,
-      reason:
-        `Role "${args.role}" is OUT OF SCOPE for invites (Maintenance/VLS/EA/Turn Around are ` +
-        "never invited by this sweep). No email sent.",
-    };
-  }
+  // 1. Role must map to a known link — the agent can never send an arbitrary
+  //    link. (2026-08-18: the out-of-scope refusal list is retired — all roles
+  //    in ROLE_LINKS are invitable, per Mo. Unmappable roles still refuse.)
   const roleKey = normalizeRole(args.role);
   if (!roleKey) {
     return {
       sent: false,
-      reason: `Role "${args.role}" does not map to any of the 5 invite roles. No email sent.`,
+      reason:
+        `Role "${args.role}" does not map to any configured invite role. No email sent. ` +
+        "Report the applicant by name so Mo can decide.",
     };
   }
   const roleDef = ROLE_LINKS[roleKey];

@@ -51,6 +51,7 @@ import {
   recruitingMcpTokenOk,
   searchVideoaskContacts,
   sendRecruitingInvite,
+  sendTestgorillaInvite,
   sendWatchdogAlert,
   updateRecruitingState,
 } from "./recruiting-tools";
@@ -159,6 +160,29 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "send_testgorilla_invite",
+    description:
+      "Send THE TestGorilla skills-assessment email (fixed template + link, from " +
+      "mo@flatfeelandlord.com) to a candidate who FULLY COMPLETED the Virtual PM VideoAsk — i.e. " +
+      "someone returned by get_videoask_completers. Dedup (Gmail Sent, subject-scoped — covers all " +
+      "~290 historical manual batches), a per-day cap, same-day idempotency, and the do-not-contact " +
+      "list are ENFORCED here; if it refuses, accept the refusal. Flow each run: read " +
+      "testgorilla_boundary from state → get_videoask_completers since that boundary → this tool " +
+      "per completer (OLDEST first) → update testgorilla_boundary to the newest completed_at you " +
+      "actually processed. If the cap is hit, STOP advancing the boundary. Args: { email, name " +
+      "(full name), completed_at? (ISO, for the log) }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        email: { type: "string", description: "Candidate email address." },
+        name: { type: "string", description: "Candidate full name (greeting uses the first word)." },
+        completed_at: { type: "string", description: "When they completed the VideoAsk (ISO)." },
+      },
+      required: ["email", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "send_watchdog_alert",
     description:
       "Email Mo a watchdog alert (fixed recipient, capped at 3/day). Use when the browser half " +
@@ -249,6 +273,12 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<un
         last_name: str(args, "last_name"),
         role: str(args, "role"),
         personal_note: str(args, "personal_note") || undefined,
+      });
+    case "send_testgorilla_invite":
+      return sendTestgorillaInvite({
+        email: str(args, "email"),
+        name: str(args, "name"),
+        completed_at: str(args, "completed_at") || undefined,
       });
     case "send_watchdog_alert":
       return sendWatchdogAlert(str(args, "reason"), str(args, "detail") || undefined);

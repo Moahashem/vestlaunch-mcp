@@ -140,6 +140,19 @@ const ROLE_LINKS: Record<string, RoleDef> = {
 /** Loose aliases → canonical role key. */
 function normalizeRole(raw: string): string | null {
   const s = raw.toLowerCase().replace(/[^a-z]+/g, " ").trim();
+  // ── Mo's REMOTE rule (2026-08-18 PM, prepping for reposted jobs with new
+  //    titles): any title containing remote/virtual/work-from-home maps to the
+  //    Virtual PM questionnaire — UNLESS it is a sales role, which keeps the
+  //    Virtual Sales Representative questionnaire (Mo's explicit exception).
+  //    Maintenance/leasing keep their own keys (same link as virtual_pm, but
+  //    the invite email then names the right role).
+  const isRemote = /remote|work from home|(^|\s)wfh(\s|$)|virtual/.test(s);
+  if (isRemote) {
+    if (/sales|business development|(^|\s)bdm?(\s|$)|account executive/.test(s)) return "virtual_sales";
+    if (/maintenance/.test(s)) return "maintenance_coordinator";
+    if (/leasing/.test(s)) return "virtual_leasing_specialist";
+    return "virtual_pm";
+  }
   // ── 2026-08-18 roles FIRST — order is load-bearing. Each of these would
   //    otherwise mis-alias into an older pattern below: "virtual leasing" into
   //    leasing_agent, "virtual sales" into bd_sales_manager, and "virtual
@@ -1096,7 +1109,7 @@ export async function getRecruitingState(): Promise<Record<string, unknown>> {
 export async function updateRecruitingState(key: string, value: unknown): Promise<Record<string, unknown>> {
   const k = key.trim();
   if (!k) throw new Error("key is required.");
-  if (/^(sent_|watchdog_sent_|videoask_contact_index)/.test(k)) {
+  if (/^(sent_|watchdog_sent_|testgorilla_sent_|videoask_contact_index)/.test(k)) {
     throw new Error(`key "${k}" is reserved for the tools' internal logs/index.`);
   }
   await crmStateRequest("POST", undefined, { agentKey: AGENT_STATE_KEY, key: k, value });
@@ -1269,6 +1282,110 @@ export async function sendRecruitingInvite(args: {
     gmail_message_id: messageId,
     sends_today: log.length,
   };
+}
+
+// ───────────────────────── send_testgorilla_invite ─────────────────────────
+//
+// Mo's ask (2026-08-18 PM): everyone who FULLY COMPLETES the "Virtual PM Flat
+// Fee Landlord" VideoAsk (= answered Screening question 2, the same question
+// get_videoask_completers reads) automatically gets the TestGorilla skills-
+// assessment email. Previously a manual batch (~290 sent through 2026-07-20).
+// The agent drives it: get_videoask_completers(since = testgorilla_boundary)
+// → send_testgorilla_invite per completer → advance testgorilla_boundary.
+// Template/subject are the EXACT proven July batch wording.
+
+const TESTGORILLA_SUBJECT = "Your Flat Fee Landlord application - next step: skills assessment";
+const TESTGORILLA_DEFAULT_LINK = "https://app.testgorilla.com/s/74janjj0";
+const TESTGORILLA_DEFAULT_CAP = 25;
+
+function testgorillaLink(): string {
+  return env("TESTGORILLA_LINK") || TESTGORILLA_DEFAULT_LINK;
+}
+
+function testgorillaCap(): number {
+  const n = Number.parseInt(env("TESTGORILLA_DAILY_CAP"), 10);
+  return Number.isFinite(n) && n > 0 ? n : TESTGORILLA_DEFAULT_CAP;
+}
+
+const TESTGORILLA_TEMPLATE = (first: string) =>
+  [
+    `Hi ${first},`,
+    "",
+    "Thanks for taking the time to record your video interview for the Virtual Property Manager role at Flat Fee Landlord. We'd like to move you to the next stage of our hiring process: a short skills assessment.",
+    "",
+    `Please complete it here: ${testgorillaLink()}`,
+    "",
+    "Once you've finished, we'll review your results and follow up on next steps. We're excited to learn more about you!",
+    "",
+    "Mo",
+    "Flat Fee Landlord",
+  ].join("\n");
+
+export async function sendTestgorillaInvite(args: {
+  email: string;
+  name: string;
+  completed_at?: string;
+}): Promise<SendResult> {
+  const email = args.email.trim().toLowerCase();
+  const name = args.name.trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error(`"${args.email}" is not a valid email.`);
+  if (!name) throw new Error("name is required.");
+  const first = name.split(/\s+/)[0];
+
+  // 1. Denylist.
+  if (DENYLIST_NAMES.some((n) => name.toLowerCase().includes(n))) {
+    return { sent: false, reason: `"${name}" is on Mo's do-not-contact list. No email sent.` };
+  }
+
+  // 2. Per-day log: cap + same-day idempotency (safe across cron retries).
+  const day = chicagoDateStamp();
+  const logKey = `testgorilla_sent_${day}`;
+  const existing = ((await readStateKey(logKey)) ?? []) as Array<{ email?: string }>;
+  const log = Array.isArray(existing) ? existing : [];
+  if (log.some((e) => (e.email ?? "").toLowerCase() === email)) {
+    return {
+      sent: false,
+      reason: `Already sent TestGorilla to ${email} earlier today (idempotency log).`,
+      sends_today: log.length,
+    };
+  }
+  if (log.length >= testgorillaCap()) {
+    return {
+      sent: false,
+      reason:
+        `Daily TestGorilla cap reached (${testgorillaCap()}). Do NOT advance testgorilla_boundary ` +
+        "past this completer — the backlog continues tomorrow. Mention the remaining count in the report.",
+      sends_today: log.length,
+    };
+  }
+
+  // 3. Dedup: have we EVER sent this address the skills assessment? Scoped by
+  //    subject — candidates legitimately have OTHER mail from us (the VideoAsk
+  //    invite), so a bare in:sent check would block everyone. This also covers
+  //    all ~290 historical manual-batch sends (same subject, same mailbox).
+  const sentMatches = await gmailSearchMessages(
+    `in:sent to:${email} subject:"skills assessment"`,
+    3,
+  );
+  if (sentMatches.length > 0) {
+    return {
+      sent: false,
+      reason: `Dedup: ${email} already received the skills-assessment email. No duplicate sent.`,
+      evidence: sentMatches.map((m) => ({ subject: m.subject, at: m.receivedAt })),
+    };
+  }
+
+  // 4. Send (template + link fixed server-side).
+  const messageId = await gmailSendMessage(email, TESTGORILLA_SUBJECT, TESTGORILLA_TEMPLATE(first));
+
+  // 5. Log BEFORE returning (idempotency across retries).
+  log.push({ email });
+  await writeStateKey(logKey, [
+    ...log.slice(0, -1),
+    { email, name, completed_at: args.completed_at, at: new Date().toISOString(), gmail_message_id: messageId },
+  ]);
+
+  return { sent: true, to: email, gmail_message_id: messageId, sends_today: log.length };
 }
 
 // ───────────────────────── watchdog alert ─────────────────────────

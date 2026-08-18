@@ -32,6 +32,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logAgentRun } from "../workforce-hub";
+import { postToRuckusChannel } from "../recruiting-report";
 
 export const config = { maxDuration: 60 };
 
@@ -54,16 +55,38 @@ const DEFAULT_PROMPT = [
   "the refusal and log why. Never invite Maintenance/VLS/EA/out-of-scope roles.",
   "(4) Watchdog: if last_run_browser is more than 3 days old, send_watchdog_alert",
   "so Mo knows LinkedIn/Indeed are going stale. (5) update_recruiting_state:",
-  "set last_run_cloud to now (ISO) and carry_forward to anything unfinished.",
-  "(6) report_recruiting_run with a one-line summary of sent/skipped/unswept.",
+  "set last_run_cloud to now — the CURRENT actual UTC time as full ISO, never a",
+  "rounded or future time — and carry_forward to anything unfinished.",
+  "(6) report_recruiting_run with a one-line summary AND the `report` field —",
+  "3-8 short '- ' bullets for Mo's phone (plain text, no markdown headers):",
+  "invites sent (name + role), refusals + the one-line why, per-channel counts,",
+  "unswept channels, watchdog fired?, carry-forward, anything needing Mo.",
   "This fire may be a RETRY — that is normal; the send tool's per-day log makes",
-  "duplicate emails impossible, so simply continue any unfinished work.",
+  "duplicate emails impossible, so simply continue any unfinished work. BUT if",
+  "last_run_cloud is less than 2 hours old, the first fire already completed:",
+  "do NOT re-sweep — call report_recruiting_run with status ok, summary",
+  "'retry no-op — first run already completed', and NO report field (so Mo is",
+  "not messaged twice), then stop.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(body));
+}
+
+/**
+ * Failure heartbeat to Mo's RingCentral channel (Mo 2026-08-18): if the run
+ * never STARTS, the agent can't post its own report — so this cron says so.
+ * The success-side report comes from the agent via report_recruiting_run.
+ * Best-effort: postToRuckusChannel never throws.
+ */
+async function notifyStartFailure(reason: string): Promise<void> {
+  await postToRuckusChannel(
+    `❌ Recruiting sweep (cloud) did NOT start — ${reason}\n` +
+      "- No channels were swept and no invites were sent this fire.\n" +
+      "- The 12:10 UTC retry may still succeed; if no ✅/⚠️ report follows, the day was missed.",
+  );
 }
 
 export default async function handler(
@@ -96,6 +119,7 @@ export default async function handler(
       summary: `recruiting sweep: missing env ${missing.join(", ")}`,
       needsHuman: true,
     });
+    await notifyStartFailure(`missing env ${missing.join(", ")}`);
     json(res, 500, { ok: false, error: `Missing env: ${missing.join(", ")}` });
     return;
   }
@@ -136,6 +160,7 @@ export default async function handler(
         summary: `recruiting sweep: create_session failed (HTTP ${createRes.status})`,
         needsHuman: true,
       });
+      await notifyStartFailure(`could not create the agent session (HTTP ${createRes.status}).`);
       json(res, 502, {
         ok: false,
         stage: "create_session",
@@ -153,6 +178,7 @@ export default async function handler(
         summary: "recruiting sweep: create_session returned no id",
         needsHuman: true,
       });
+      await notifyStartFailure("session was created but no session id came back.");
       json(res, 502, {
         ok: false,
         stage: "create_session",
@@ -178,6 +204,7 @@ export default async function handler(
         summary: `recruiting sweep: send_event failed (HTTP ${eventRes.status})`,
         needsHuman: true,
       });
+      await notifyStartFailure(`session created but the kickoff message failed (HTTP ${eventRes.status}).`);
       json(res, 502, {
         ok: false,
         stage: "send_event",
@@ -202,6 +229,7 @@ export default async function handler(
       summary: `recruiting sweep: ${msg}`,
       needsHuman: true,
     });
+    await notifyStartFailure(msg.slice(0, 300));
     json(res, 500, { ok: false, error: msg });
   }
 }

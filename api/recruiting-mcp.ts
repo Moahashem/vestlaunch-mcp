@@ -21,7 +21,9 @@
  *   WRITE send_watchdog_alert       — email Mo when the browser half is stale
  *   READ  get_recruiting_state      — shared state (ffl-crm Workforce Hub)
  *   WRITE update_recruiting_state   — same
- *   WRITE report_recruiting_run     — run-status row for the AI OS dashboard
+ *   WRITE report_recruiting_run     — run-status row for the AI OS dashboard +
+ *                                     Mo's bullet report → his RingCentral
+ *                                     channel (Ruckus send path; Mo 2026-08-18)
  *
  * Auth: static Bearer — the vault credential's token must equal the Vercel env
  * RECRUITING_MCP_TOKEN (≥32 chars; endpoint fails CLOSED until set). Same
@@ -47,12 +49,12 @@ import {
   getRecruitingState,
   getVideoaskCompleters,
   recruitingMcpTokenOk,
-  reportRecruitingRun,
   searchVideoaskContacts,
   sendRecruitingInvite,
   sendWatchdogAlert,
   updateRecruitingState,
 } from "./recruiting-tools";
+import { reportRecruitingRunWithRc } from "./recruiting-report";
 
 // 300s: the contact-index rebuild (first dedup call after 12h) pages every
 // form's contacts through Zapier — parallel across forms, but the largest
@@ -193,15 +195,27 @@ const TOOLS: ToolDef[] = [
   {
     name: "report_recruiting_run",
     description:
-      "Report this run to the AI Workforce Hub dashboard (agentKey recruiting-sweep). Call once at " +
-      "the end of every run. Args: { status: 'ok'|'partial'|'failed', summary (one line), " +
-      "needsHuman? }.",
+      "Report this run to the AI Workforce Hub dashboard (agentKey recruiting-sweep) AND post Mo's " +
+      "bullet report into his RingCentral channel (via the Ruckus send path). Call once at the end " +
+      "of EVERY run — success or failure. Args: { status: 'ok'|'partial'|'failed', summary (one " +
+      "line), needsHuman?, report }. `report` is what Mo reads on his phone: 3-8 short '- ' bullets, " +
+      "plain text, no markdown headers/bold — invites sent (name + role), refusals and the one-line " +
+      "why, per-channel counts, unswept channels, watchdog fired?, carry-forward, anything needing " +
+      "him. ALWAYS include `report` — except on a same-day retry where the first run already " +
+      "completed and you did nothing: then omit `report` so Mo isn't messaged twice (a non-ok " +
+      "status still posts automatically).",
     inputSchema: {
       type: "object",
       properties: {
         status: { type: "string", description: "'ok' | 'partial' | 'failed'" },
         summary: { type: "string", description: "One-line summary of what was swept/sent/skipped." },
         needsHuman: { type: "boolean", description: "True if Mo needs to look." },
+        report: {
+          type: "string",
+          description:
+            "Bullet report for Mo's RingCentral channel: 3-8 short '- ' bullets, plain text. " +
+            "Omit ONLY on a no-op same-day retry.",
+        },
       },
       required: ["status", "summary"],
       additionalProperties: false,
@@ -237,10 +251,11 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<un
     case "update_recruiting_state":
       return updateRecruitingState(str(args, "key"), args.value);
     case "report_recruiting_run":
-      return reportRecruitingRun({
+      return reportRecruitingRunWithRc({
         status: str(args, "status"),
         summary: str(args, "summary"),
         needsHuman: args.needsHuman === true,
+        report: str(args, "report") || undefined,
       });
     default:
       throw new Error(`Unknown tool: ${name}`);

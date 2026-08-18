@@ -9,8 +9,9 @@ The email half of the recruiting invite sweep, moved off Mo's Mac onto Anthropic
 | Var | What | Status |
 |---|---|---|
 | `RECRUITING_MCP_TOKEN` | New random string ≥32 chars. Gates `/api/recruiting-mcp`; the SAME value goes in the vault credential. Endpoint fails closed until set. | NEW |
-| `GOOGLE_SA_KEY_JSON` | Full JSON key of the Google service account (setup below). Direct Gmail API as mo@flatfeelandlord.com. | NEW |
-| `GMAIL_IMPERSONATE` | Optional; defaults to `mo@flatfeelandlord.com`. | optional |
+| `GMAIL_OAUTH_CLIENT_ID` / `GMAIL_OAUTH_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | The HOUSE Gmail pattern (same as ffl-crm lib/gmail.ts): an OAuth client in the Google Cloud project + a refresh token Mo minted by consenting once as mo@flatfeelandlord.com (setup below). Preferred — the org policy `iam.disableServiceAccountKeyCreation` blocks SA key files. | NEW |
+| `GOOGLE_SA_KEY_JSON` | Fallback only: service-account JSON key with domain-wide delegation. UNUSABLE today (org policy); kept for a future keyless/WIF migration. | fallback |
+| `GMAIL_IMPERSONATE` | Expected mailbox for verification + From; defaults to `mo@flatfeelandlord.com`. | optional |
 | `ZAPIER_RECRUITING_MCP_URL` | URL of the **dedicated** recruiting Zapier MCP server (setup below). VideoAsk only. | NEW |
 | `ZAPIER_RECRUITING_MCP_TOKEN` | Only if that server uses a separate Bearer (most Zapier MCP URLs are self-authing). | optional |
 | `VIDEOASK_ORG_ID` | Defaults to the FFL org `94dc21de-…853e3`. | optional |
@@ -19,16 +20,15 @@ The email half of the recruiting invite sweep, moved off Mo's Mac onto Anthropic
 | `RECRUITING_DAILY_PROMPT` | Optional kickoff-prompt override. | optional |
 | `ANTHROPIC_API_KEY`, `FFL_ENVIRONMENT_ID`, `FFL_VAULT_ID`, `CRON_SECRET`, `FFL_WORKFORCE_API_KEY`, `VESTLAUNCH_BASE_URL` | Already set (shared with the other crons). `FFL_WORKFORCE_API_KEY` must carry `agent:read` + `agent:write` (state + run-status). | existing |
 
-## One-time setup A — Google service account (direct Gmail API)
+## One-time setup A — Gmail OAuth refresh token (house pattern)
 
-Why: Managed Agents can't hold secrets (D8) and Zapier's Gmail app has no raw-API action and can't enumerate a search window — so the Vercel functions call the Gmail API directly, authenticating as a service account that's allowed to act as mo@flatfeelandlord.com.
+Why: Managed Agents can't hold secrets (D8) and Zapier's Gmail app has no raw-API action and can't enumerate a search window — so the Vercel functions call the Gmail API directly. The original plan (service-account key + domain-wide delegation) is BLOCKED by the org policy `iam.disableServiceAccountKeyCreation` (Google Secure-by-Default; hit live 2026-08-17). The replacement is the pattern ffl-crm already uses for Gmail: OAuth client + refresh token, exchanged over plain fetch.
 
-1. console.cloud.google.com (logged in as mo@flatfeelandlord.com) → create/select a project → **APIs & Services → Enable APIs** → enable **Gmail API**.
-2. **IAM & Admin → Service Accounts → Create** (name e.g. `recruiting-sweep`). No roles needed.
-3. Open the account → **Keys → Add key → JSON**. The downloaded file's entire contents = `GOOGLE_SA_KEY_JSON`.
-4. Copy the account's **Unique ID (Client ID)** → admin.google.com → **Security → Access and data control → API controls → Domain-wide delegation → Add new**: that Client ID with scopes
-   `https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.send`
-   (exactly these two — read + send, nothing else).
+1. console.cloud.google.com (as mo@flatfeelandlord.com), project with **Gmail API enabled** (already true on "My First Project" / stalwart-method-489818-r3) → **APIs & Services → Credentials → Create credentials → OAuth client ID**, type **Web application**, name `recruiting-sweep`, authorized redirect URI `https://developers.google.com/oauthplayground`.
+2. Mint the refresh token in **Google OAuth Playground** (developers.google.com/oauthplayground): gear icon → "Use your own OAuth credentials" → paste the client ID + secret → authorize scopes `https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send` → sign in as **mo@flatfeelandlord.com** → Exchange authorization code for tokens → copy the **refresh token**. (Secrets stay in Mo's browser end to end.)
+3. Vercel env: `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`. Internal-app refresh tokens do not expire; revoke anytime at myaccount.google.com → Security → Third-party access, or by deleting the OAuth client.
+
+(The `recruiting-sweep` service account created 2026-08-17 still exists with no keys — harmless; it becomes useful only if this ever migrates to keyless WIF like ffl-crm's GA4 integration.)
 
 ## One-time setup B — dedicated Zapier MCP server (VideoAsk only)
 

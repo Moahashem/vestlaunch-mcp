@@ -13,13 +13,15 @@
  *    payload must die inside this Vercel function, never reach the agent.
  *
  * UPSTREAM TRANSPORTS (all secrets in Vercel env — Mo places them, never hard-coded)
- *  - Gmail (mo@flatfeelandlord.com): DIRECT Gmail API via a Google Cloud
- *    service account with domain-wide delegation (Mo's ruling 2026-08-17:
- *    "if it has direct APIs do that"). Zapier's Gmail app exposes no raw API
- *    Request action and its find_email cannot enumerate a window, so direct
- *    is also the only *correct* path for sweep searches.
- *      GOOGLE_SA_KEY_JSON   — full JSON key of the service account
- *      GMAIL_IMPERSONATE    — mailbox to act as (default mo@flatfeelandlord.com)
+ *  - Gmail (mo@flatfeelandlord.com): DIRECT Gmail API. Preferred auth = OAuth
+ *    refresh token (GMAIL_OAUTH_CLIENT_ID/SECRET + GMAIL_REFRESH_TOKEN) — the
+ *    HOUSE pattern, identical to ffl-crm lib/gmail.ts. The original
+ *    service-account-key plan is blocked by the org policy
+ *    iam.disableServiceAccountKeyCreation (hit live 2026-08-17); the SA-JWT
+ *    path below is kept only for a future keyless/WIF migration.
+ *      GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET / GMAIL_REFRESH_TOKEN
+ *      GOOGLE_SA_KEY_JSON   — fallback only (unusable under current org policy)
+ *      GMAIL_IMPERSONATE    — expected mailbox (default mo@flatfeelandlord.com)
  *  - VideoAsk: via the DEDICATED recruiting Zapier MCP server (raw GET action).
  *    VideoAsk's direct API is OAuth-only with 24h tokens; Zapier already holds
  *    and refreshes that OAuth (connection verified 2026-08-17).
@@ -122,7 +124,7 @@ function normalizeRole(raw: string): string | null {
 /** People we never contact (Mo's standing instruction). Matched on full name, case-insensitive. */
 const DENYLIST_NAMES = ["joel sandoval"];
 
-// ───────────────────────── Gmail (direct API via service account) ─────────────────────────
+// ───────────────────────── Gmail (direct API) ─────────────────────────
 
 interface GoogleSaKey {
   client_email: string;
@@ -135,8 +137,8 @@ function loadSaKey(): GoogleSaKey {
   const raw = env("GOOGLE_SA_KEY_JSON");
   if (!raw) {
     throw new Error(
-      "Gmail is not configured: set GOOGLE_SA_KEY_JSON (service-account JSON key with " +
-        "domain-wide delegation for gmail.readonly + gmail.send) in the Vercel env.",
+      "Gmail is not configured: set GMAIL_OAUTH_CLIENT_ID + GMAIL_OAUTH_CLIENT_SECRET + " +
+        "GMAIL_REFRESH_TOKEN (house pattern, preferred) or GOOGLE_SA_KEY_JSON in the Vercel env.",
     );
   }
   let parsed: unknown;
@@ -160,10 +162,57 @@ export function gmailImpersonatedUser(): string {
   return env("GMAIL_IMPERSONATE") || GMAIL_DEFAULT_IMPERSONATE;
 }
 
+/**
+ * OAuth refresh-token grant — the HOUSE Gmail pattern (ffl-crm lib/gmail.ts
+ * does exactly this). Used because the flatfeelandlord.com org enforces
+ * iam.disableServiceAccountKeyCreation (discovered live 2026-08-17), so a
+ * downloadable service-account key cannot exist. The refresh token is minted
+ * once by Mo consenting as mo@flatfeelandlord.com; internal-app refresh
+ * tokens do not expire. gmailVerifiedMailbox() still guards that the token
+ * really belongs to the expected mailbox.
+ */
+async function refreshGrantToken(clientId: string, clientSecret: string, refreshToken: string): Promise<{ token: string; expiresIn: number }> {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Gmail OAuth refresh failed (HTTP ${res.status}): ${text.slice(0, 300)}`);
+  }
+  const body = JSON.parse(text) as { access_token?: string; expires_in?: number };
+  if (!body.access_token) throw new Error("Gmail OAuth refresh returned no access_token.");
+  return { token: body.access_token, expiresIn: body.expires_in ?? 3600 };
+}
+
 async function googleAccessToken(): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   if (cachedGoogleToken && cachedGoogleToken.expiresAt - 60 > now) return cachedGoogleToken.token;
 
+  // Preferred path: OAuth refresh token (house pattern).
+  const clientId = env("GMAIL_OAUTH_CLIENT_ID");
+  const clientSecret = env("GMAIL_OAUTH_CLIENT_SECRET");
+  const refreshToken = env("GMAIL_REFRESH_TOKEN");
+  if (clientId && clientSecret && refreshToken) {
+    const { token, expiresIn } = await refreshGrantToken(clientId, clientSecret, refreshToken);
+    cachedGoogleToken = { token, expiresAt: now + expiresIn };
+    return token;
+  }
+  if (clientId || clientSecret || refreshToken) {
+    throw new Error(
+      "Gmail OAuth is partially configured — GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET " +
+        "and GMAIL_REFRESH_TOKEN must all be set.",
+    );
+  }
+
+  // Fallback: service-account JWT with domain-wide delegation (kept for a
+  // future keyless/WIF migration; unusable today — org policy blocks SA keys).
   const key = loadSaKey();
   const scopes = [
     "https://www.googleapis.com/auth/gmail.readonly",

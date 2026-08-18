@@ -13,7 +13,7 @@
  *   READ  get_videoask_completers   — {name,email,completed_at} only; transcripts
  *                                     stripped server-side (D13 — the ~5k-token
  *                                     VideoAsk payload trap)
- *   READ  search_videoask_contacts  — live Contacts-by-surname dedup check
+ *   READ  search_videoask_contacts  — all-forms contact-index dedup check
  *   READ  get_new_applicants        — SOP Gmail sweeps, parsed + verified mailbox
  *   WRITE send_recruiting_invite    — ONE fixed template, hard-coded role→link
  *                                     map, server-ENFORCED dedup + denylist +
@@ -28,7 +28,7 @@
  * model as the ruckus/agent-os relays: the vault injects the Bearer only for
  * this URL, which is the ONLY credential path Managed Agents has (D8).
  *
- * Gmail here is DIRECT API via a Google service account (Vercel env), NOT the
+ * Gmail here is DIRECT API via an OAuth refresh token (house pattern), NOT the
  * shared agent Zapier server — Gmail stays off that server (D11) and this
  * endpoint's curation is what keeps the blast radius to one email template.
  */
@@ -54,7 +54,10 @@ import {
   updateRecruitingState,
 } from "./recruiting-tools";
 
-export const config = { maxDuration: 60 };
+// 300s: the contact-index rebuild (first dedup call after 12h) pages every
+// form's contacts through Zapier — parallel across forms, but the largest
+// form's sequential pages can exceed 60s.
+export const config = { maxDuration: 300 };
 
 interface ToolDef {
   name: string;
@@ -83,9 +86,11 @@ const TOOLS: ToolDef[] = [
   {
     name: "search_videoask_contacts",
     description:
-      "Search the live VideoAsk Contacts (all 4,500+, always current) — the REQUIRED dedup check " +
-      "before judging anyone 'never submitted'. Search by LAST NAME, not email (candidates often " +
-      "complete under a different email). Returns [{name, email, created_at}]. Args: { query }.",
+      "Search VideoAsk contacts across ALL forms in the org — the REQUIRED dedup check before " +
+      "judging anyone 'never submitted'. Search by LAST NAME, not email (candidates often complete " +
+      "under a different email). Backed by an all-forms index the server rebuilds when >12h old; " +
+      "the first call of a run may take 1-2 minutes while it rebuilds — that is normal, wait for it. " +
+      "Returns { hits: [{name, email, created_at, form}], index_updated_at, index_total }. Args: { query }.",
     inputSchema: {
       type: "object",
       properties: {
@@ -122,7 +127,7 @@ const TOOLS: ToolDef[] = [
     name: "send_recruiting_invite",
     description:
       "Send THE standard VideoAsk-invite email from mo@flatfeelandlord.com. The template and the " +
-      "role→link mapping are fixed server-side; dedup (Gmail in:sent + VideoAsk Contacts by last " +
+      "role→link mapping are fixed server-side; dedup (Gmail in:sent + VideoAsk contacts by last " +
       "name), the do-not-contact list, a per-day cap, and same-day idempotency are ENFORCED here — " +
       "if the tool refuses, accept the refusal and report it (do not retry with altered names). " +
       "Roles: Regional Manager, Community/Apartment Manager, Assistant Community Manager (Wizehire " +
@@ -134,7 +139,7 @@ const TOOLS: ToolDef[] = [
       properties: {
         email: { type: "string", description: "Candidate email address." },
         first_name: { type: "string", description: "Candidate first name (used in the greeting)." },
-        last_name: { type: "string", description: "Candidate last name (drives the Contacts dedup)." },
+        last_name: { type: "string", description: "Candidate last name (drives the contacts dedup)." },
         role: { type: "string", description: "Role they applied for (free text; mapped server-side)." },
         personal_note: {
           type: "string",
@@ -174,7 +179,7 @@ const TOOLS: ToolDef[] = [
     description:
       "Upsert one key in the shared recruiting-sweep state. Use at the end of every run (e.g. key " +
       "'last_run_cloud' = ISO timestamp; key 'carry_forward' = array). Keys prefixed sent_/" +
-      "watchdog_sent_ are reserved. Args: { key, value (any JSON) }.",
+      "watchdog_sent_ and the dedup index are reserved. Args: { key, value (any JSON) }.",
     inputSchema: {
       type: "object",
       properties: {

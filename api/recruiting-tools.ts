@@ -442,12 +442,18 @@ async function gmailSearchMessages(
   return out;
 }
 
+/** RFC 2047-encode a header value when it contains non-ASCII (found live
+ *  2026-08-18: the invite subject's en-dash rendered as "Ã¢Â€Â“" without this). */
+function encodeHeaderWord(s: string): string {
+  return /^[\x20-\x7e]*$/.test(s) ? s : `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
+}
+
 async function gmailSendMessage(to: string, subject: string, body: string): Promise<string> {
   const from = gmailImpersonatedUser();
   const raw = [
     `From: ${from}`,
     `To: ${to}`,
-    `Subject: ${subject}`,
+    `Subject: ${encodeHeaderWord(subject)}`,
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
     "",

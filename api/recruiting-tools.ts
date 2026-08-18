@@ -958,7 +958,10 @@ export async function getNewApplicants(
     // emails are usually Indeed RELAY addresses (…@indeedemail.com) — they
     // forward to the candidate and are valid invite targets.
     // Digests ("debrief") carry no candidate emails and are excluded.
-    const q = `from:indeed.com ${after} -subject:debrief`;
+    // NOTE: individual notifications come from conversation-…@indeedemail.com
+    // (a DIFFERENT domain than indeed.com — Gmail's from: does not cross-match
+    // them; verified live 2026-08-18). Search both.
+    const q = `(from:indeedemail.com OR from:indeed.com) ${after} -subject:debrief`;
     const msgs = await gmailSearchMessages(q, 50);
     const junk = /debrief|digest|newsletter|billing|receipt|sponsor your job|performance report|invite candidates to apply/i;
     const hits = msgs

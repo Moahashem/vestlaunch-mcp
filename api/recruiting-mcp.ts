@@ -194,9 +194,13 @@ const TOOLS: ToolDef[] = [
       "VideoAsk contact index (so they never engaged), and have not already been nudged. Roster " +
       "comes from OUR OWN sent invites, oldest first. Returns { pending: [{email, role, " +
       "invited_at, days_waiting}], scanned_invites, already_reminded, completed, truncated, " +
+      "window_days, " +
       "coverage }. READ `coverage`: Indeed applicants that only ever appeared inside a bundled " +
       "grouped email have no address in mail and are NOT here — they were invited natively by " +
       "Indeed's own automation and can only be nudged through Indeed messaging (browser half). " +
+      "Newest invite first — recent applicants convert, so the daily cap is not spent on the " +
+      "coldest names in the window. Only invites from the last 21 days are considered " +
+      "(VIDEOASK_REMINDER_WINDOW_DAYS); anything older is left alone deliberately. " +
       "Args: { days_since_invite? (default 3), limit? (default 25) }.",
     inputSchema: {
       type: "object",

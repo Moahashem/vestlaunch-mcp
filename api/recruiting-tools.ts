@@ -1470,7 +1470,14 @@ const REMINDER_SUBJECT = "Quick nudge - your Flat Fee Landlord video questionnai
 const INVITE_SUBJECT_MARKER = "Next step for the";
 const REMINDER_DEFAULT_CAP = 25;
 const REMINDER_DEFAULT_DELAY_DAYS = 3;
-const REMINDER_LOOKBACK_DAYS = 60;
+const REMINDER_LOOKBACK_DAYS_DEFAULT = 21;
+// Reminder-window ceiling. 21 days, not 60: a nudge about a questionnaire from eight weeks
+// ago reads worse than no nudge at all, and the first run would otherwise start with the
+// stalest candidates in the backlog. Override with VIDEOASK_REMINDER_WINDOW_DAYS.
+function reminderWindowDays(): number {
+  const n = Number.parseInt(env("VIDEOASK_REMINDER_WINDOW_DAYS"), 10);
+  return Number.isFinite(n) && n > 0 ? n : REMINDER_LOOKBACK_DAYS_DEFAULT;
+}
 const REMINDER_SCAN_CAP = 60;
 
 function reminderCap(): number {
@@ -1540,6 +1547,7 @@ export async function getVideoaskPending(
   completed: number;
   truncated: boolean;
   days_since_invite: number;
+  window_days: number;
   coverage: string;
 }> {
   const days =
@@ -1549,11 +1557,11 @@ export async function getVideoaskPending(
   const cap = Number.isFinite(limit as number) && (limit as number) > 0 ? Math.floor(limit as number) : 25;
 
   const invites = await gmailSearchMessages(
-    `in:sent subject:"${INVITE_SUBJECT_MARKER}" older_than:${days}d newer_than:${REMINDER_LOOKBACK_DAYS}d`,
+    `in:sent subject:"${INVITE_SUBJECT_MARKER}" older_than:${days}d newer_than:${reminderWindowDays()}d`,
     REMINDER_SCAN_CAP,
   );
   const reminders = await gmailSearchMessages(
-    `in:sent subject:"${REMINDER_SUBJECT}" newer_than:${REMINDER_LOOKBACK_DAYS * 2}d`,
+    `in:sent subject:"${REMINDER_SUBJECT}" newer_than:365d`,
     REMINDER_SCAN_CAP,
   );
   const remindedTo = new Set(reminders.map((m) => headerEmail(m.to)).filter(Boolean));
@@ -1567,8 +1575,11 @@ export async function getVideoaskPending(
   let alreadyReminded = 0;
   let completed = 0;
 
-  // Oldest invite first — the longest-waiting candidate gets the nudge first.
-  const ordered = [...invites].sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt));
+  // NEWEST invite first. The instinct is oldest-first (longest wait = most owed a nudge), but
+  // with a standing backlog that spends the daily cap on the coldest names in the window
+  // while someone who applied on Tuesday waits behind them. Recent applicants convert; a
+  // three-week-old silence usually stays silent.
+  const ordered = [...invites].sort((a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt));
   for (const m of ordered) {
     const email = headerEmail(m.to);
     if (!email || seen.has(email)) continue;
@@ -1597,6 +1608,7 @@ export async function getVideoaskPending(
     completed,
     truncated: pending.length > cap || invites.length >= REMINDER_SCAN_CAP,
     days_since_invite: days,
+    window_days: reminderWindowDays(),
     coverage:
       "Roster = invites WE sent. Indeed applicants who only appeared inside a bundled grouped " +
       "email have no address in mail and are NOT in this list — they were invited natively by " +

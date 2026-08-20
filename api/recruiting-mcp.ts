@@ -54,6 +54,8 @@ import {
   sendTestgorillaInvite,
   sendWatchdogAlert,
   updateRecruitingState,
+  getVideoaskPending,
+  sendVideoaskReminder,
 } from "./recruiting-tools";
 import { reportRecruitingRunWithRc } from "./recruiting-report";
 
@@ -186,6 +188,51 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "get_videoask_pending",
+    description:
+      "List candidates who received the VideoAsk invite at least N days ago, are NOT in the " +
+      "VideoAsk contact index (so they never engaged), and have not already been nudged. Roster " +
+      "comes from OUR OWN sent invites, oldest first. Returns { pending: [{email, role, " +
+      "invited_at, days_waiting}], scanned_invites, already_reminded, completed, truncated, " +
+      "coverage }. READ `coverage`: Indeed applicants that only ever appeared inside a bundled " +
+      "grouped email have no address in mail and are NOT here — they were invited natively by " +
+      "Indeed's own automation and can only be nudged through Indeed messaging (browser half). " +
+      "Args: { days_since_invite? (default 3), limit? (default 25) }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        days_since_invite: {
+          type: "number",
+          description: "Only candidates invited at least this many days ago (default 3).",
+        },
+        limit: { type: "number", description: "Max candidates to return (default 25)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "send_videoask_reminder",
+    description:
+      "Send THE follow-up nudge (fixed template + role-mapped link, from mo@flatfeelandlord.com) " +
+      "to ONE candidate returned by get_videoask_pending. Enforced server-side: do-not-contact " +
+      "list, per-day cap, same-day idempotency, ONE nudge per candidate ever (subject-scoped " +
+      "Gmail dedup), proof that WE invited them (refuses otherwise), and a fail-CLOSED VideoAsk " +
+      "contact check so anyone who already engaged is never nudged. If it refuses, accept the " +
+      "refusal and report the one-line why — never retry with altered names. Args: { email, " +
+      "first_name, last_name, role? (recovered from our invite when omitted) }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        email: { type: "string", description: "Candidate email address." },
+        first_name: { type: "string", description: "Candidate first name (greeting)." },
+        last_name: { type: "string", description: "Candidate last name (drives the contacts dedup)." },
+        role: { type: "string", description: "Role, if known; otherwise recovered server-side." },
+      },
+      required: ["email", "first_name", "last_name"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "send_watchdog_alert",
     description:
       "Email Mo a watchdog alert (fixed recipient, capped at 3/day). Use when the browser half " +
@@ -283,6 +330,18 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<un
         name: str(args, "name"),
         role: str(args, "role") || undefined,
         completed_at: str(args, "completed_at") || undefined,
+      });
+    case "get_videoask_pending":
+      return getVideoaskPending(
+        typeof args.days_since_invite === "number" ? args.days_since_invite : undefined,
+        typeof args.limit === "number" ? args.limit : undefined,
+      );
+    case "send_videoask_reminder":
+      return sendVideoaskReminder({
+        email: str(args, "email"),
+        first_name: str(args, "first_name"),
+        last_name: str(args, "last_name"),
+        role: str(args, "role") || undefined,
       });
     case "send_watchdog_alert":
       return sendWatchdogAlert(str(args, "reason"), str(args, "detail") || undefined);

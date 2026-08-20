@@ -969,17 +969,32 @@ export async function getNewApplicants(
   }
 
   if (ch === "indeed") {
-    // 2026-08-18 (Mo): Indeed moved to the cloud half. Per-application email
-    // notifications are enabled in the Indeed employer dashboard, so each
-    // apply lands in this inbox with the candidate's details. We intentionally
-    // do NOT rigidly parse the layout (Indeed changes it); return the full
-    // body text and let the agent extract name / email / role. Candidate
-    // emails are usually Indeed RELAY addresses (…@indeedemail.com) — they
-    // forward to the candidate and are valid invite targets.
-    // Digests ("debrief") carry no candidate emails and are excluded.
-    // NOTE: individual notifications come from conversation-…@indeedemail.com
-    // (a DIFFERENT domain than indeed.com — Gmail's from: does not cross-match
-    // them; verified live 2026-08-18). Search both.
+    // 2026-08-18 (Mo): Indeed moved to the cloud half. Individual application
+    // notifications arrive from conversation-…@indeedemail.com carrying the
+    // candidate's RELAY address (a valid invite target). We deliberately do NOT
+    // parse the layout (Indeed changes it) — return the full body and let the
+    // agent extract name / email / role.
+    //
+    // 2026-08-20 (Lando — verified live against the employer dashboard and 7
+    // days of mail): Indeed does NOT send one email per application. Above a
+    // low daily volume it BUNDLES a posting's applications into ONE grouped
+    // email (from=grouped-application-email-bundled, "<Name> and N others
+    // applied") that names only the first 3 applicants and carries NO candidate
+    // email addresses. Measured: 5 individual notifications in 7 days against
+    // ~150 real applications, spread across 4 different postings. The posting's
+    // "Individual email each time someone applies" setting was already ON for
+    // every posting checked, so flipping it changes nothing.
+    //
+    // The digest-vs-hits "UNCONFIGURED posting" inference that used to live here
+    // has been REMOVED: it fired on every high-volume posting, always falsely,
+    // and on 2026-08-20 it sent a human into Indeed to enable a setting that was
+    // already enabled.
+    //
+    // Nobody is missed. Each posting carries its own Indeed "Message new
+    // candidates" automation (verified On, correct per-role VideoAsk link) which
+    // messages 100% of applicants natively, within hours of applying. This
+    // channel is therefore a best-effort CRM feed, NOT the invite path for
+    // Indeed.
     const q = `(from:indeedemail.com OR from:indeed.com) ${after} -subject:debrief`;
     const msgs = await gmailSearchMessages(q, 50);
     const junk = /debrief|digest|newsletter|billing|receipt|sponsor your job|performance report|invite candidates to apply/i;
@@ -992,11 +1007,8 @@ export async function getNewApplicants(
         received_at: m.receivedAt,
         message_id: m.id,
       }));
-    // NEW-POSTING DETECTOR (Mo, 2026-08-18): the per-application email setting
-    // lives on each POSTING, so a newly created job silently reverts to
-    // digest-only until someone flips its checkbox. Digests are returned
-    // separately as a detection signal: any job title appearing in a digest
-    // but sending NO individual emails this window is an unconfigured posting.
+    // Digests are still returned, but ONLY as volume context for the report —
+    // never as a configuration signal. See the note below.
     const digestMsgs = await gmailSearchMessages(
       `from:no-reply@indeed.com subject:debrief ${after}`,
       10,
@@ -1014,15 +1026,18 @@ export async function getNewApplicants(
       digests,
       total: hits.length,
       note:
-        "hits = individual Indeed application notifications (full body). Extract candidate name, " +
-        "email (relay …@indeedemail.com addresses are valid), and role, then send_recruiting_invite " +
-        "— ALL roles, per Mo's 2026-08-18 ruling. A hit with no extractable candidate email = skip " +
-        "and report it by subject. digests = daily debrief summaries, for DETECTION ONLY (never " +
-        "invite from them — they carry no candidate emails): compare the job titles listed in " +
-        "digests against the job titles seen in hits; a job receiving applications in a digest but " +
-        "sending NO individual emails is an UNCONFIGURED posting (its per-application email setting " +
-        "and/or auto-message automation was never enabled — happens whenever a job is newly posted " +
-        "or reposted). Flag it in the Needs-you section by job title.",
+        "hits = Indeed application notifications (full body). Extract candidate name, email (relay " +
+        "…@indeedemail.com addresses are valid), and role, then send_recruiting_invite — ALL roles, " +
+        "per Mo's 2026-08-18 ruling. A hit with no extractable candidate email = SKIP it quietly: " +
+        "Indeed's bundled emails never carry candidate addresses, and those applicants have already " +
+        "been invited natively by the posting's own Indeed 'Message new candidates' automation. " +
+        "digests = daily debrief summaries, VOLUME CONTEXT ONLY. Do NOT compare digest job titles " +
+        "against hit titles, and NEVER raise a Needs-you item about per-application email settings " +
+        "or an 'unconfigured posting' — missing individual emails is Indeed's normal bundling " +
+        "behaviour at volume (verified 2026-08-20), not a misconfiguration, and the setting is " +
+        "already on for every posting. If Indeed is worth a line in the report at all, report the " +
+        "honest shape: '<n> individual notifications visible; the rest of the day's applications " +
+        "arrived bundled and were invited natively by Indeed.'",
     };
   }
 
@@ -1115,7 +1130,7 @@ export async function getRecruitingState(): Promise<Record<string, unknown>> {
 export async function updateRecruitingState(key: string, value: unknown): Promise<Record<string, unknown>> {
   const k = key.trim();
   if (!k) throw new Error("key is required.");
-  if (/^(sent_|watchdog_sent_|testgorilla_sent_|videoask_contact_index)/.test(k)) {
+  if (/^(sent_|watchdog_sent_|testgorilla_sent_|videoask_reminder_sent_|videoask_contact_index)/.test(k)) {
     throw new Error(`key "${k}" is reserved for the tools' internal logs/index.`);
   }
   await crmStateRequest("POST", undefined, { agentKey: AGENT_STATE_KEY, key: k, value });
@@ -1429,6 +1444,314 @@ export async function sendTestgorillaInvite(args: {
   ]);
 
   return { sent: true, to: email, role: roleDisplay, gmail_message_id: messageId, sends_today: log.length };
+}
+
+// ───────────────────────── VideoAsk reminder pass ─────────────────────────
+//
+// Lando's ask (2026-08-20): every applicant who received the VideoAsk invite
+// but has NOT completed the questionnaire gets ONE follow-up nudge, for every
+// applicant we hold a usable address for.
+//
+// Shape mirrors send_testgorilla_invite: fixed server-side template, per-day
+// cap, same-day idempotency, subject-scoped ever-sent dedup (so nobody is
+// nudged twice, ever), the do-not-contact list, and a fail-CLOSED completion
+// check against the all-forms VideoAsk contact index.
+//
+// Reach, stated honestly rather than implied:
+//   * covered — anyone we invited ourselves (our own sent invite IS the
+//     roster), including Indeed candidates whose relay address we hold;
+//   * NOT covered — Indeed applicants who only ever appeared inside a bundled
+//     grouped email. Those carry no address anywhere in mail. They were invited
+//     natively by Indeed's own automation and can only be nudged through
+//     Indeed's messaging UI, which is the browser half's job.
+// get_videoask_pending reports that gap in `coverage` instead of hiding it.
+
+const REMINDER_SUBJECT = "Quick nudge - your Flat Fee Landlord video questionnaire";
+const INVITE_SUBJECT_MARKER = "Next step for the";
+const REMINDER_DEFAULT_CAP = 25;
+const REMINDER_DEFAULT_DELAY_DAYS = 3;
+const REMINDER_LOOKBACK_DAYS = 60;
+const REMINDER_SCAN_CAP = 60;
+
+function reminderCap(): number {
+  const n = Number.parseInt(env("VIDEOASK_REMINDER_DAILY_CAP"), 10);
+  return Number.isFinite(n) && n > 0 ? n : REMINDER_DEFAULT_CAP;
+}
+
+function reminderDelayDays(): number {
+  const n = Number.parseInt(env("VIDEOASK_REMINDER_DELAY_DAYS"), 10);
+  return Number.isFinite(n) && n > 0 ? n : REMINDER_DEFAULT_DELAY_DAYS;
+}
+
+const REMINDER_TEMPLATE = (first: string, roleDisplay: string, link: string) =>
+  [
+    `Hi ${first},`,
+    "",
+    `A few days ago we sent you a short video questionnaire for the ${roleDisplay} role at Flat Fee Landlord, and it looks like it is still open.`,
+    "",
+    "It takes about 5 minutes, and it is the step that moves your application forward:",
+    "",
+    link,
+    "",
+    "If you have already completed it, thank you - please ignore this. And if you are no longer interested, no problem at all; you can ignore this too and we will close out your application.",
+    "",
+    "Best,",
+    "The team at Flat Fee Landlord",
+  ].join("\n");
+
+/** Pull the bare address out of a To/From header ("Name <a@b.c>" → "a@b.c"). */
+function headerEmail(raw: string): string {
+  const m = /<([^>]+)>/.exec(raw ?? "");
+  return (m?.[1] ?? raw ?? "").trim().toLowerCase();
+}
+
+/** Recover the role from our own invite subject: "Next step for the <Role> role – …". */
+function roleFromInviteSubject(subject: string): string | undefined {
+  const m = /next step for the (.+?) role/i.exec(subject ?? "");
+  return m?.[1]?.trim();
+}
+
+export interface PendingCandidate {
+  email: string;
+  role?: string;
+  invited_at: string;
+  days_waiting: number;
+}
+
+/**
+ * get_videoask_pending — everyone we invited at least `days` ago who is not in
+ * the VideoAsk contact index and has not already been nudged.
+ *
+ * Roster source is our OWN sent invite (subject marker "Next step for the"),
+ * which is the only place an applicant's address and role are reliably paired.
+ * Exclusion is by EMAIL only here — deliberately loose, because a last-name
+ * match would suppress every candidate who shares a surname with a completer.
+ * The strict fail-closed name check runs in send_videoask_reminder, so a
+ * candidate can still be refused at send time; that refusal is the safe
+ * direction and gets reported.
+ */
+export async function getVideoaskPending(
+  daysSinceInvite?: number,
+  limit?: number,
+): Promise<{
+  pending: PendingCandidate[];
+  scanned_invites: number;
+  already_reminded: number;
+  completed: number;
+  truncated: boolean;
+  days_since_invite: number;
+  coverage: string;
+}> {
+  const days =
+    Number.isFinite(daysSinceInvite as number) && (daysSinceInvite as number) > 0
+      ? Math.floor(daysSinceInvite as number)
+      : reminderDelayDays();
+  const cap = Number.isFinite(limit as number) && (limit as number) > 0 ? Math.floor(limit as number) : 25;
+
+  const invites = await gmailSearchMessages(
+    `in:sent subject:"${INVITE_SUBJECT_MARKER}" older_than:${days}d newer_than:${REMINDER_LOOKBACK_DAYS}d`,
+    REMINDER_SCAN_CAP,
+  );
+  const reminders = await gmailSearchMessages(
+    `in:sent subject:"${REMINDER_SUBJECT}" newer_than:${REMINDER_LOOKBACK_DAYS * 2}d`,
+    REMINDER_SCAN_CAP,
+  );
+  const remindedTo = new Set(reminders.map((m) => headerEmail(m.to)).filter(Boolean));
+
+  // Completion / engagement check, in bulk: the all-forms contact index.
+  const index = await getContactIndex();
+  const completedEmails = new Set(index.contacts.map((c) => (c.e ?? "").toLowerCase()).filter(Boolean));
+
+  const seen = new Set<string>();
+  const pending: PendingCandidate[] = [];
+  let alreadyReminded = 0;
+  let completed = 0;
+
+  // Oldest invite first — the longest-waiting candidate gets the nudge first.
+  const ordered = [...invites].sort((a, b) => Date.parse(a.receivedAt) - Date.parse(b.receivedAt));
+  for (const m of ordered) {
+    const email = headerEmail(m.to);
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    if (remindedTo.has(email)) {
+      alreadyReminded += 1;
+      continue;
+    }
+    if (completedEmails.has(email)) {
+      completed += 1;
+      continue;
+    }
+    const sentAt = Date.parse(m.receivedAt);
+    pending.push({
+      email,
+      role: roleFromInviteSubject(m.subject),
+      invited_at: m.receivedAt,
+      days_waiting: Number.isNaN(sentAt) ? 0 : Math.floor((Date.now() - sentAt) / 86400000),
+    });
+  }
+
+  return {
+    pending: pending.slice(0, cap),
+    scanned_invites: invites.length,
+    already_reminded: alreadyReminded,
+    completed,
+    truncated: pending.length > cap || invites.length >= REMINDER_SCAN_CAP,
+    days_since_invite: days,
+    coverage:
+      "Roster = invites WE sent. Indeed applicants who only appeared inside a bundled grouped " +
+      "email have no address in mail and are NOT in this list — they were invited natively by " +
+      "Indeed's own automation and can only be nudged through Indeed's messaging UI (browser " +
+      "half). Say so plainly in the report rather than implying full coverage.",
+  };
+}
+
+/**
+ * send_videoask_reminder — ONE follow-up nudge to a candidate who was invited
+ * and has not completed the questionnaire. Every guard that protects
+ * send_recruiting_invite applies, plus two more: we refuse to nudge anyone we
+ * cannot prove we invited, and we refuse to nudge twice.
+ */
+export async function sendVideoaskReminder(args: {
+  email: string;
+  first_name: string;
+  last_name: string;
+  role?: string;
+}): Promise<SendResult> {
+  const email = args.email.trim().toLowerCase();
+  const first = args.first_name.trim();
+  const last = args.last_name.trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error(`"${args.email}" is not a valid email.`);
+  if (!first || !last) throw new Error("first_name and last_name are both required (last name drives dedup).");
+
+  // 1. Denylist.
+  const fullName = `${first} ${last}`.toLowerCase();
+  if (DENYLIST_NAMES.some((n) => fullName.includes(n))) {
+    return { sent: false, reason: `"${first} ${last}" is on Mo's do-not-contact list. No email sent.` };
+  }
+
+  // 2. Per-day log: cap + same-day idempotency (safe across cron retries).
+  const day = chicagoDateStamp();
+  const logKey = `videoask_reminder_sent_${day}`;
+  const existing = ((await readStateKey(logKey)) ?? []) as Array<{ email?: string }>;
+  const log = Array.isArray(existing) ? existing : [];
+  if (log.some((e) => (e.email ?? "").toLowerCase() === email)) {
+    return {
+      sent: false,
+      reason: `Already nudged ${email} earlier today (idempotency log).`,
+      sends_today: log.length,
+    };
+  }
+  if (log.length >= reminderCap()) {
+    return {
+      sent: false,
+      reason:
+        `Daily reminder cap reached (${reminderCap()}). Carry the rest forward — the backlog ` +
+        "continues tomorrow — and put the remaining count in the report.",
+      sends_today: log.length,
+    };
+  }
+
+  // 3. We must be able to PROVE we invited them, and recover their role from
+  //    that invite. Never nudge someone about a questionnaire we never sent.
+  const inviteMatches = await gmailSearchMessages(
+    `in:sent to:${email} subject:"${INVITE_SUBJECT_MARKER}"`,
+    3,
+  );
+  if (inviteMatches.length === 0) {
+    return {
+      sent: false,
+      reason:
+        `No VideoAsk invite to ${email} found in Sent — refusing to nudge someone we cannot prove ` +
+        "we invited. If they applied through Indeed they were invited by Indeed's own automation; " +
+        "that nudge has to go through Indeed messaging (browser half), not email.",
+    };
+  }
+
+  // 4. One nudge per person, ever (subject-scoped).
+  const reminderMatches = await gmailSearchMessages(
+    `in:sent to:${email} subject:"${REMINDER_SUBJECT}"`,
+    3,
+  );
+  if (reminderMatches.length > 0) {
+    return {
+      sent: false,
+      reason: `Dedup: ${email} already received the follow-up nudge. One per candidate, ever.`,
+      evidence: reminderMatches.map((m) => ({ subject: m.subject, at: m.receivedAt })),
+    };
+  }
+
+  // 5. Have they already engaged? Fail CLOSED, exactly like the invite path:
+  //    if the contact index is unreachable we refuse rather than risk nudging
+  //    someone who already recorded their video.
+  try {
+    const res = await searchVideoaskContacts(last);
+    const hit = res.hits.find(
+      (h) =>
+        (h.email ?? "").toLowerCase() === email ||
+        (h.name ?? "").toLowerCase().includes(fullName) ||
+        (h.name ?? "").toLowerCase().includes(`${last.toLowerCase()}, ${first.toLowerCase()}`),
+    );
+    if (hit) {
+      return {
+        sent: false,
+        reason:
+          `VideoAsk contacts already include "${hit.name}" (${hit.email || "no email"}) — they have ` +
+          "engaged with a questionnaire. No nudge sent.",
+        evidence: [{ name: hit.name, email: hit.email, form: hit.form, created_at: hit.created_at }],
+      };
+    }
+  } catch (err) {
+    return {
+      sent: false,
+      reason:
+        `VideoAsk contacts check failed (${err instanceof Error ? err.message : String(err)}). ` +
+        "Refusing to nudge blind — retry next run.",
+    };
+  }
+
+  // 6. Resolve the role → the questionnaire link. Caller's role wins; otherwise
+  //    recover it from our own invite subject. An unmappable role is refused —
+  //    the agent can never cause an arbitrary link to be sent.
+  const roleRaw =
+    args.role?.trim() || roleFromInviteSubject(inviteMatches[0]?.subject ?? "") || "";
+  const roleKey = normalizeRole(roleRaw);
+  const roleDef = roleKey ? ROLE_LINKS[roleKey] : undefined;
+  if (!roleDef) {
+    return {
+      sent: false,
+      reason:
+        `Could not map a role for ${email} (looked at "${roleRaw || "nothing"}"). No nudge sent — ` +
+        "report them by name so Mo can decide.",
+    };
+  }
+
+  // 7. Send, then log BEFORE returning (idempotency across cron retries).
+  const messageId = await gmailSendMessage(
+    email,
+    REMINDER_SUBJECT,
+    REMINDER_TEMPLATE(first, roleDef.display, roleDef.link),
+  );
+  log.push({ email });
+  await writeStateKey(logKey, [
+    ...log.slice(0, -1),
+    {
+      email,
+      name: `${first} ${last}`,
+      role: roleDef.display,
+      invited_at: inviteMatches[0]?.receivedAt,
+      at: new Date().toISOString(),
+      gmail_message_id: messageId,
+    },
+  ]);
+
+  return {
+    sent: true,
+    to: email,
+    role: roleDef.display,
+    link: roleDef.link,
+    gmail_message_id: messageId,
+    sends_today: log.length,
+  };
 }
 
 // ───────────────────────── watchdog alert ─────────────────────────

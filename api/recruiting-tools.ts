@@ -1512,6 +1512,32 @@ function headerEmail(raw: string): string {
   return (m?.[1] ?? raw ?? "").trim().toLowerCase();
 }
 
+/**
+ * Recover the candidate's real name from the invite WE sent. Never guess it from
+ * the email address: `cblake822@gmail.com` yields "C", and the first live run
+ * (2026-08-20) duly greeted three people as "Hi C,", "Hi R," and "Hi B,". Worse
+ * than cosmetic — the guessed LAST name drives the fail-closed VideoAsk dedup, so
+ * a wrong guess checks the wrong person.
+ *
+ * Two sources, both authoritative because they came from us:
+ *   1. the To header's display name — "Chelsie Blake <cblake822@gmail.com>";
+ *   2. the invite body's greeting — INVITE_TEMPLATE always opens "Hi <first>,".
+ * No source means no name, and no name means the agent must skip and report,
+ * never invent one.
+ */
+function nameFromToHeader(raw: string): string | undefined {
+  const m = /^\s*"?([^"<]*[A-Za-z][^"<]*?)"?\s*</.exec(raw ?? "");
+  const n = m?.[1]?.trim();
+  if (!n || n.includes("@")) return undefined;
+  return n;
+}
+
+function firstNameFromInviteBody(body: string): string | undefined {
+  const m = /(?:^|\n)\s*Hi\s+([^,\n]{2,40}),/.exec(body ?? "");
+  const n = m?.[1]?.trim();
+  return n && /^[A-Za-z]/.test(n) ? n : undefined;
+}
+
 /** Recover the role from our own invite subject: "Next step for the <Role> role – …". */
 function roleFromInviteSubject(subject: string): string | undefined {
   const m = /next step for the (.+?) role/i.exec(subject ?? "");
@@ -1520,6 +1546,9 @@ function roleFromInviteSubject(subject: string): string | undefined {
 
 export interface PendingCandidate {
   email: string;
+  name?: string;
+  /** Where `name` came from — never the email address. */
+  name_source?: "to_header" | "invite_greeting";
   role?: string;
   invited_at: string;
   days_waiting: number;
@@ -1593,8 +1622,12 @@ export async function getVideoaskPending(
       continue;
     }
     const sentAt = Date.parse(m.receivedAt);
+    const headerName = nameFromToHeader(m.to);
+    const greetingName = headerName ? undefined : firstNameFromInviteBody(m.bodyText);
     pending.push({
       email,
+      name: headerName ?? greetingName,
+      name_source: headerName ? "to_header" : greetingName ? "invite_greeting" : undefined,
       role: roleFromInviteSubject(m.subject),
       invited_at: m.receivedAt,
       days_waiting: Number.isNaN(sentAt) ? 0 : Math.floor((Date.now() - sentAt) / 86400000),
@@ -1634,6 +1667,31 @@ export async function sendVideoaskReminder(args: {
   const last = args.last_name.trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error(`"${args.email}" is not a valid email.`);
   if (!first || !last) throw new Error("first_name and last_name are both required (last name drives dedup).");
+
+  // 0. Never greet an initial. On the first live run (2026-08-20) three people were
+  //    emailed "Hi C,", "Hi R," and "Hi B," because get_videoask_pending returned no
+  //    name and the agent derived one from the email address. That also means the
+  //    LAST name was invented — and the invented last name is what the fail-closed
+  //    VideoAsk dedup below checks, so a wrong guess checks the wrong person. Refuse
+  //    instead: use the `name` get_videoask_pending now returns, or skip and report.
+  if (first.length < 2 || !/^[A-Za-z]/.test(first)) {
+    return {
+      sent: false,
+      reason:
+        `first_name "${first}" looks derived from the email address, not from a real name. Refusing — ` +
+        "a one-letter greeting reads as broken, and the guessed last name would be checked against the " +
+        "wrong person in the dedup. Use the name from get_videoask_pending, or report this candidate " +
+        "by email and move on.",
+    };
+  }
+  if (last.length < 2 || !/^[A-Za-z]/.test(last)) {
+    return {
+      sent: false,
+      reason:
+        `last_name "${last}" is not a usable surname, and dedup runs on it. Refusing — use the name ` +
+        "from get_videoask_pending or report this candidate by email.",
+    };
+  }
 
   // 1. Denylist.
   const fullName = `${first} ${last}`.toLowerCase();

@@ -1191,7 +1191,7 @@ export interface SendResult {
 export type SendChannel = "email" | "indeed_message";
 
 /** Indeed relay addresses look like conversation-<name>-<id>@indeedemail.com. */
-function sendChannelFor(email: string): SendChannel {
+export function sendChannelFor(email: string): SendChannel {
   return /@indeedemail\.com$/i.test(email.trim()) ? "indeed_message" : "email";
 }
 
@@ -1845,6 +1845,49 @@ export async function sendVideoaskReminder(args: {
     gmail_message_id: messageId,
     sends_today: log.length,
     channel: sendChannelFor(email),
+  };
+}
+
+// ───────────────────────── send receipts (report source of truth) ─────────────────────────
+//
+// Lando, 2026-08-20: "how can we be for sure that these things happened?" Fair
+// question — until now the daily report was the agent NARRATING its own work, and
+// a narration cannot be audited. Every send already writes a receipt the instant
+// the mail leaves: recipient, role, timestamp and the real Gmail message id. So
+// the report's numbers are now COUNTED from these receipts instead of written by
+// the model, which makes it structurally unable to report a send that never
+// happened or miscount one that did.
+
+export interface SendReceipt {
+  email?: string;
+  name?: string;
+  role?: string;
+  at?: string;
+  gmail_message_id?: string;
+}
+
+export interface TodayReceipts {
+  day: string;
+  invites: SendReceipt[];
+  skills_tests: SendReceipt[];
+  reminders: SendReceipt[];
+}
+
+/** Read today's three per-day send logs. Never throws — a dead state store must
+ *  not cost Lando his daily message, so the caller falls back instead. */
+export async function getTodaySendReceipts(): Promise<TodayReceipts> {
+  const day = chicagoDateStamp();
+  const asList = (v: unknown): SendReceipt[] => (Array.isArray(v) ? (v as SendReceipt[]) : []);
+  const [invites, skills, reminders] = await Promise.all([
+    readStateKey(`sent_${day}`),
+    readStateKey(`testgorilla_sent_${day}`),
+    readStateKey(`videoask_reminder_sent_${day}`),
+  ]);
+  return {
+    day,
+    invites: asList(invites),
+    skills_tests: asList(skills),
+    reminders: asList(reminders),
   };
 }
 

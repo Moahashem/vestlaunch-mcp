@@ -227,7 +227,10 @@ const TOOLS: ToolDef[] = [
       "list, per-day cap, same-day idempotency, ONE nudge per candidate ever (subject-scoped " +
       "Gmail dedup), proof that WE invited them (refuses otherwise), and a fail-CLOSED VideoAsk " +
       "contact check so anyone who already engaged is never nudged. If it refuses, accept the " +
-      "refusal and report the one-line why — never retry with altered names. Args: { email, " +
+      "refusal and report the one-line why — never retry with altered names. Every send tool returns " +
+      "`channel`: \"indeed_message\" when the address is an Indeed relay (…@indeedemail.com — the " +
+      "candidate reads it inside their Indeed message thread) or \"email\" otherwise. Tally those for " +
+      "the daily report. Args: { email, " +
       "first_name, last_name, role? (recovered from our invite when omitted) }.",
     inputSchema: {
       type: "object",

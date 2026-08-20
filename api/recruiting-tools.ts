@@ -1178,6 +1178,21 @@ export interface SendResult {
   link?: string;
   gmail_message_id?: string;
   sends_today?: number;
+  /**
+   * How the candidate actually receives this. Everything this server sends goes
+   * out over Gmail, but an Indeed RELAY address delivers into the candidate's
+   * Indeed message thread rather than their own inbox — from their side it is an
+   * Indeed message, and Lando asked to see that split in the daily report.
+   * Classified here, not guessed by the agent.
+   */
+  channel?: SendChannel;
+}
+
+export type SendChannel = "email" | "indeed_message";
+
+/** Indeed relay addresses look like conversation-<name>-<id>@indeedemail.com. */
+function sendChannelFor(email: string): SendChannel {
+  return /@indeedemail\.com$/i.test(email.trim()) ? "indeed_message" : "email";
 }
 
 function sendCap(): number {
@@ -1302,6 +1317,7 @@ export async function sendRecruitingInvite(args: {
     link: roleDef.link,
     gmail_message_id: messageId,
     sends_today: log.length,
+    channel: sendChannelFor(email),
   };
 }
 
@@ -1443,7 +1459,14 @@ export async function sendTestgorillaInvite(args: {
     { email, name, role: roleDisplay, completed_at: args.completed_at, at: new Date().toISOString(), gmail_message_id: messageId },
   ]);
 
-  return { sent: true, to: email, role: roleDisplay, gmail_message_id: messageId, sends_today: log.length };
+  return {
+    sent: true,
+    to: email,
+    role: roleDisplay,
+    gmail_message_id: messageId,
+    sends_today: log.length,
+    channel: sendChannelFor(email),
+  };
 }
 
 // ───────────────────────── VideoAsk reminder pass ─────────────────────────
@@ -1821,6 +1844,7 @@ export async function sendVideoaskReminder(args: {
     link: roleDef.link,
     gmail_message_id: messageId,
     sends_today: log.length,
+    channel: sendChannelFor(email),
   };
 }
 

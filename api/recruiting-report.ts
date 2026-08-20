@@ -113,8 +113,12 @@ function didBlockFromReceipts(r: {
 
 /** Keep only the agent's judgement half: everything from NEEDS YOU onward. */
 function needsYouTail(agentReport: string): string {
-  const i = agentReport.search(/NEEDS YOU/i);
-  return i >= 0 ? agentReport.slice(i).trim() : "Nothing needs you.";
+  // Case-SENSITIVE and anchored to a line start. The first cut used /NEEDS YOU/i,
+  // which matched the "needs you" inside the all-clear line "Nothing needs you."
+  // and sliced it into a bare "needs you." — Lando's 2026-08-20 4:17pm report.
+  // The marker is a literal uppercase block header, so match it as one.
+  const m = /^NEEDS YOU\b/m.exec(agentReport ?? "");
+  return m ? agentReport.slice(m.index).trim() : "Nothing needs you.";
 }
 
 /**

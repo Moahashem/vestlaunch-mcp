@@ -30,9 +30,15 @@
  * this for a scheduled agent.)
  *
  * Safe-write scaffold (D13): writes are OFF unless VESTLAUNCH_ENABLE_WRITES=true.
- * Even when on, DELETE-method tools are NEVER exposed, and an optional
- * VESTLAUNCH_WRITE_ALLOWLIST (comma-separated tool names) restricts writes to
- * exactly those tools — least privilege for any future "acting" agent.
+ * An optional VESTLAUNCH_WRITE_ALLOWLIST (comma-separated tool names) restricts
+ * writes to exactly those tools — least privilege for any future "acting" agent.
+ *
+ * DELETE-method tools are exposed one name at a time, never as a class: only
+ * tools listed in VESTLAUNCH_DELETE_ALLOWLIST are registered. Default is
+ * `delete_contact` — enough to clear the test records the intake endpoints
+ * create, and nothing that can drop a workspace, pipeline, campaign or API key.
+ * Set the var to `none` to hide every DELETE again. Deletes are still writes,
+ * so the write gates above apply on top.
  *
  * Auth (three modes, decided by the Bearer token each request carries):
  *   1. SIGN-IN / OAuth (preferred for humans in Claude Desktop): the client has
@@ -48,8 +54,8 @@
  *      proxied straight to the CRM, which validates it and returns ONLY the
  *      tools its scopes allow — revoke the key in the CRM and MCP access dies
  *      instantly. Writes are governed by the key's scopes (server-side), so
- *      VESTLAUNCH_ENABLE_WRITES does not apply; DELETE-method tools are still
- *      NEVER exposed.
+ *      VESTLAUNCH_ENABLE_WRITES does not apply; DELETE-method tools follow the
+ *      delete allowlist below.
  *   3. LEGACY shared token (MCP_BEARER_TOKEN): behaves exactly as before —
  *      uses the env VESTLAUNCH_API_KEY, writes gated by
  *      VESTLAUNCH_ENABLE_WRITES + VESTLAUNCH_WRITE_ALLOWLIST. Kept for
@@ -97,6 +103,15 @@ interface Cfg {
   enableWrites: boolean;
   timeoutMs: number;
   writeAllowlist: Set<string> | null;
+  /** DELETE tools permitted by name. Empty set = no deletes exposed. */
+  deleteAllowlist: Set<string>;
+}
+
+// DELETE tools are opt-in by name, in both auth modes. "none" exposes nothing.
+function parseDeleteAllowlist(): Set<string> {
+  const raw = (process.env.VESTLAUNCH_DELETE_ALLOWLIST ?? "delete_contact").trim();
+  if (raw.toLowerCase() === "none") return new Set<string>();
+  return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
 }
 
 function loadCfg(perUserApiKey?: string): Cfg {
@@ -109,7 +124,14 @@ function loadCfg(perUserApiKey?: string): Cfg {
     // Per-user mode: the connecting user's own CRM key. The CRM enforces the
     // key's scopes server-side (and the blast guardrail is server-enforced),
     // so writes are allowed here and scoping comes from /api/v1/me.
-    return { baseUrl, apiKey: perUserApiKey, enableWrites: true, timeoutMs, writeAllowlist: null };
+    return {
+      baseUrl,
+      apiKey: perUserApiKey,
+      enableWrites: true,
+      timeoutMs,
+      writeAllowlist: null,
+      deleteAllowlist: parseDeleteAllowlist(),
+    };
   }
 
   // Legacy mode: shared env key, writes gated by env flags (unchanged).
@@ -125,6 +147,7 @@ function loadCfg(perUserApiKey?: string): Cfg {
     enableWrites: (process.env.VESTLAUNCH_ENABLE_WRITES ?? "").trim().toLowerCase() === "true",
     timeoutMs,
     writeAllowlist,
+    deleteAllowlist: parseDeleteAllowlist(),
   };
 }
 
@@ -242,8 +265,9 @@ function buildToolDef(
   const isWrite = WRITE_METHODS.includes(tool.method);
   if (isWrite) {
     if (!cfg.enableWrites) return null;
-    // Safe-write scaffold: never expose destructive DELETEs through this MCP.
-    if (tool.method === "DELETE") return null;
+    // Safe-write scaffold: DELETEs are exposed one name at a time, never as a
+    // class. Anything absent from the delete allowlist stays hidden.
+    if (tool.method === "DELETE" && !cfg.deleteAllowlist.has(tool.name)) return null;
     // If an allowlist is configured, only expose explicitly-named write tools.
     if (cfg.writeAllowlist && !cfg.writeAllowlist.has(tool.name)) return null;
   }

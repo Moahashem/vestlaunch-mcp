@@ -1476,12 +1476,29 @@ function authkitDomain(): string {
   return (process.env.WORKOS_AUTHKIT_DOMAIN ?? "").trim().replace(/\/+$/, "");
 }
 
-/** Public URL of THIS resource, echoed to clients in the 401 challenge. */
+/**
+ * Public URL of THIS resource, echoed to clients in the 401 challenge.
+ *
+ * MUST be a stable, publicly reachable host. VERCEL_URL is the per-deployment
+ * hostname (vestlaunch-<hash>-<scope>.vercel.app), and this project has Vercel
+ * SSO protection set to "all except custom domains" — so a client following
+ * that URL for OAuth discovery is 302'd to a Vercel login wall and the connect
+ * fails. Existing sessions survive on their token and never notice; the break
+ * only shows up on the next reconnect, which is what every redeploy forces.
+ *
+ * Order: explicit override, then Vercel's stable production domain, then the
+ * per-deployment host as a last resort, then a hardcoded fallback.
+ */
 function resourceMetadataUrl(): string {
   const explicit = (process.env.MCP_RESOURCE_URL ?? "").trim().replace(/\/+$/, "");
+  const productionHost = (process.env.VERCEL_PROJECT_PRODUCTION_URL ?? "").trim();
   const base = explicit
     ? explicit.replace(/\/api\/mcp$/, "")
-    : (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://vestlaunch-mcp.vercel.app");
+    : productionHost
+      ? `https://${productionHost}`
+      : process.env.VERCEL_URL
+        ? `https://${process.env.VERCEL_URL}`
+        : "https://vestlaunch-mcp.vercel.app";
   return `${base}/.well-known/oauth-protected-resource`;
 }
 

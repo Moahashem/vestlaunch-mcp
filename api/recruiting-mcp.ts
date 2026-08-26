@@ -174,16 +174,24 @@ const TOOLS: ToolDef[] = [
       "actually processed. If the cap is hit, STOP advancing the boundary. The email names the " +
       "role they applied for: pass `role` if you know it from context; otherwise the server " +
       "recovers it from our own sent invite, and if neither works the wording stays role-neutral " +
-      "(never guesses). Args: { email, name (full name), role?, completed_at? (ISO, for the log) }.",
+      "(never guesses). NEVER skip a completer because their name looks wrong or is missing — some " +
+      "people type their email address into the VideoAsk name field. Pass what you have (or omit " +
+      "`name`) and the greeting falls back to \"Hi there,\". They finished the screening, so they " +
+      "get the assessment. Args: { email, name? (full name), role?, completed_at? (ISO, for the log) }.",
     inputSchema: {
       type: "object",
       properties: {
         email: { type: "string", description: "Candidate email address." },
-        name: { type: "string", description: "Candidate full name (greeting uses the first word)." },
+        name: {
+          type: "string",
+          description:
+            "Candidate full name, if there is a real one (greeting uses the first word). Omit, or " +
+            'pass it as-is, when the name field holds junk — the greeting becomes "Hi there,".',
+        },
         role: { type: "string", description: "Role they applied for, if known (free text)." },
         completed_at: { type: "string", description: "When they completed the VideoAsk (ISO)." },
       },
-      required: ["email", "name"],
+      required: ["email"],
       additionalProperties: false,
     },
   },

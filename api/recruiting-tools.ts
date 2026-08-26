@@ -1344,9 +1344,33 @@ function testgorillaCap(): number {
   return Number.isFinite(n) && n > 0 ? n : TESTGORILLA_DEFAULT_CAP;
 }
 
-const TESTGORILLA_TEMPLATE = (first: string, roleDisplay?: string) =>
+/**
+ * A first name we are willing to put after "Hi ". Returns null when the name
+ * field holds something that is not a name.
+ *
+ * 2026-08-26: a completer typed their email address into the VideoAsk name
+ * field, the agent (correctly) would not greet them "Hi klau24_1198@hotmail.com,"
+ * and the assessment simply never went out — a real candidate stalled by a
+ * typo, surfaced to Lando as a chore. The greeting falls back to "Hi there,"
+ * now instead.
+ *
+ * Scoped to the assessment send ON PURPOSE. sendRecruitingInvite and
+ * sendVideoaskReminder refuse a bad name and must keep refusing: their dedup
+ * keys off the LAST name, so an invented name checks the wrong person (the
+ * "Hi C," incident, 2026-08-20). TestGorilla dedups on email + subject, so a
+ * neutral greeting costs nothing.
+ */
+export function greetableFirstName(name: string): string | null {
+  const first = name.trim().split(/\s+/)[0] ?? "";
+  if (first.length < 2) return null;
+  if (first.includes("@")) return null; // an email address, not a name
+  if (!/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’.-]*$/.test(first)) return null; // digits, underscores, junk
+  return first;
+}
+
+const TESTGORILLA_TEMPLATE = (first: string | null, roleDisplay?: string) =>
   [
-    `Hi ${first},`,
+    `Hi ${first ?? "there"},`,
     "",
     // Mo (2026-08-18 PM): name the role they ACTUALLY applied for — the form
     // is shared by Virtual PM / VLS / Maintenance since 8/18. When the role
@@ -1390,18 +1414,19 @@ async function resolveTestgorillaRole(email: string, roleArg?: string): Promise<
 
 export async function sendTestgorillaInvite(args: {
   email: string;
-  name: string;
+  name?: string;
   role?: string;
   completed_at?: string;
 }): Promise<SendResult> {
   const email = args.email.trim().toLowerCase();
-  const name = args.name.trim();
+  const name = (args.name ?? "").trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error(`"${args.email}" is not a valid email.`);
-  if (!name) throw new Error("name is required.");
-  const first = name.split(/\s+/)[0];
+  // A missing or unusable name is no longer a refusal — the email is the
+  // identity here, the name is only the greeting. See greetableFirstName().
+  const first = greetableFirstName(name);
 
   // 1. Denylist.
-  if (DENYLIST_NAMES.some((n) => name.toLowerCase().includes(n))) {
+  if (name && DENYLIST_NAMES.some((n) => name.toLowerCase().includes(n))) {
     return { sent: false, reason: `"${name}" is on Mo's do-not-contact list. No email sent.` };
   }
 

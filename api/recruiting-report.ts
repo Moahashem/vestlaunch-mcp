@@ -111,14 +111,81 @@ function didBlockFromReceipts(r: {
   return { block: `Did:\n${lines.join("\n")}\n\n(counted from ${receipts})`, total };
 }
 
-/** Keep only the agent's judgement half: everything from NEEDS YOU onward. */
-function needsYouTail(agentReport: string): string {
-  // Case-SENSITIVE and anchored to a line start. The first cut used /NEEDS YOU/i,
-  // which matched the "needs you" inside the all-clear line "Nothing needs you."
-  // and sliced it into a bare "needs you." — Lando's 2026-08-20 4:17pm report.
-  // The marker is a literal uppercase block header, so match it as one.
-  const m = /^NEEDS YOU\b/m.exec(agentReport ?? "");
-  return m ? agentReport.slice(m.index).trim() : "Nothing needs you.";
+const ALL_CLEAR = "Nothing needs you.";
+
+/**
+ * The one line to show when the agent raised its hand but its reason did not
+ * survive — a marker it never wrote, or a report that arrived empty. Saying so
+ * beats printing the all-clear under a header that shouts NEEDS YOU.
+ */
+const REASON_MISSING =
+  "- Something was flagged for you on this run but the reason did not come through. Ask Claude to look.";
+
+/**
+ * Keep only the agent's judgement half: everything from NEEDS YOU onward.
+ * Returns null on a clean run so the caller can tell "all clear" apart from
+ * "flagged but silent" — two very different messages to wake up to.
+ */
+function needsYouTail(agentReport: string): string | null {
+  // Anchored to a line start so the "needs you" inside the all-clear line
+  // "Nothing needs you." can never match — that slice produced a bare
+  // "needs you." in Lando's 2026-08-20 4:17pm report. Case-insensitive from
+  // 2026-08-26: the marker is uppercase in the agent's system prompt but the
+  // cron kickoff prompt asked for "👉 Needs you:", and a report that follows
+  // the kickoff wording must not lose its reason over letter case.
+  const m = /^[ \t]*(?:👉[ \t]*)?NEEDS YOU\b/im.exec(agentReport ?? "");
+  if (!m) return null;
+  // Drop the marker line itself — the header already says NEEDS YOU, and
+  // saying it twice in two consecutive lines is noise on a phone screen.
+  const bullets = agentReport
+    .slice(m.index)
+    // Only the marker LINE goes — never the "- " starting the first bullet.
+    .replace(/^[ \t]*(?:👉[ \t]*)?NEEDS YOU\b[ \t]*:?[ \t]*\r?\n?/i, "")
+    .trim();
+  return bullets || null;
+}
+
+/**
+ * Build the exact message that lands in Lando's channel. Pure — no network, no
+ * clock beyond the date stamp — so every rule below is unit-testable.
+ *
+ * Two rules, both learned the hard way (2026-08-26):
+ *  1. ONE vocabulary. The header used to say "NEEDS MO" while the block below
+ *     said "NEEDS YOU". Same thing, two names.
+ *  2. The ask goes FIRST. It used to sit under the routine "Did:" list, so a
+ *     day that needed him looked identical to a quiet one until he scrolled.
+ *
+ * The flag is raised by EITHER signal — the agent's `needsHuman` boolean or an
+ * actual NEEDS YOU block — so forgetting one can no longer hide the other. And
+ * a flag with no reason says so out loud instead of printing the all-clear.
+ */
+export function composeReport(args: {
+  status: string;
+  summary: string;
+  report?: string;
+  needsHuman?: boolean;
+  /** Receipt-counted "Did:" block, or null when the state store was unreachable. */
+  did?: { block: string; total: number } | null;
+  dateStamp?: string;
+}): string {
+  const status = ["ok", "failed", "partial"].includes(args.status) ? args.status : "ok";
+  const icon = status === "ok" ? "✅" : status === "partial" ? "⚠️" : "❌";
+  const report = (args.report ?? "").trim();
+
+  const tail = needsYouTail(report);
+  const action = tail ?? (args.needsHuman === true ? REASON_MISSING : null);
+  const header =
+    `${icon} Recruiting sweep (cloud) — ${args.dateStamp ?? chicagoDateStamp()} — ${status.toUpperCase()}` +
+    (action ? " — 👉 NEEDS YOU" : "");
+
+  // A null `did` means the receipt store was unreachable. Post the agent's own
+  // words rather than nothing, but never print the reason twice.
+  const didBlock = args.did?.block ?? null;
+  if (action) {
+    // Blank line under the header so the ask reads as its own paragraph.
+    return didBlock ? `${header}\n\n${action}\n\n${didBlock}` : `${header}\n\n${action}`;
+  }
+  return `${header}\n${didBlock ? `${didBlock}\n\n${ALL_CLEAR}` : report || `- ${args.summary.trim()}`}`;
 }
 
 /**
@@ -140,38 +207,45 @@ export async function reportRecruitingRunWithRc(args: {
   needsHuman?: boolean;
   report?: string;
 }): Promise<Record<string, unknown>> {
+  const status = ["ok", "failed", "partial"].includes(args.status) ? args.status : "ok";
+  const report = (args.report ?? "").trim();
+
+  // The agent's own words are kept on the run row (payload.report) so a reason
+  // that gets garbled on the way to RingCentral is still recoverable later.
+  // On 2026-08-26 a run was flagged NEEDS MO and only `summary` was stored, so
+  // answering "why?" meant reading the Console transcript by hand.
   const base = await reportRecruitingRun({
     status: args.status,
     summary: args.summary,
     needsHuman: args.needsHuman,
+    payload: report ? { report } : undefined,
   });
 
-  const status = ["ok", "failed", "partial"].includes(args.status) ? args.status : "ok";
-  const report = (args.report ?? "").trim();
   let rc: { posted: boolean; error?: string } = { posted: false, error: "skipped (no report; status ok)" };
   let receiptTotal: number | undefined;
   let bodySource = "agent";
   if (report || status !== "ok") {
-    const icon = status === "ok" ? "✅" : status === "partial" ? "⚠️" : "❌";
-    const header =
-      `${icon} Recruiting sweep (cloud) — ${chicagoDateStamp()} — ${status.toUpperCase()}` +
-      (args.needsHuman ? " — NEEDS MO" : "");
-
     // Numbers from receipts, judgement from the agent. If the state store is
     // unreachable we fall back to the agent's own text rather than drop the
     // message — a silent day is worse than an unaudited one.
-    let body = report || `- ${args.summary.trim()}`;
+    let did: { block: string; total: number } | null = null;
     try {
-      const receipts = await getTodaySendReceipts();
-      const did = didBlockFromReceipts(receipts);
+      did = didBlockFromReceipts(await getTodaySendReceipts());
       receiptTotal = did.total;
       bodySource = "receipts";
-      body = `${did.block}\n\n${needsYouTail(report)}`;
     } catch {
       bodySource = "agent (receipts unavailable)";
     }
 
-    rc = await postToRuckusChannel(`${header}\n${body}`);
+    rc = await postToRuckusChannel(
+      composeReport({
+        status,
+        summary: args.summary,
+        report,
+        needsHuman: args.needsHuman,
+        did,
+      }),
+    );
   }
 
   return {

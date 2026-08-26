@@ -1923,6 +1923,8 @@ export async function reportRecruitingRun(args: {
   status: string;
   summary: string;
   needsHuman?: boolean;
+  /** Kept on the run row so a needs-you reason is recoverable after the fact. */
+  payload?: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
   const key = workforceKey();
   if (!key) return { reported: false, reason: "FFL_WORKFORCE_API_KEY not set." };
@@ -1936,6 +1938,7 @@ export async function reportRecruitingRun(args: {
       summary: args.summary.slice(0, 1000),
       needsHuman: args.needsHuman ?? false,
       tier: "yellow",
+      ...(args.payload ? { payload: args.payload } : {}),
     }),
   });
   return { reported: res.ok, http_status: res.status };

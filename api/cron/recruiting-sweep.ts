@@ -31,7 +31,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { logAgentRun } from "../workforce-hub";
+import { logAgentRun, shouldSkipRedundantKickoff } from "../workforce-hub";
 import { postToRuckusChannel } from "../recruiting-report";
 
 export const config = { maxDuration: 60 };
@@ -139,6 +139,16 @@ export default async function handler(
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret && req.headers["authorization"] !== `Bearer ${cronSecret}`) {
     json(res, 401, { ok: false, error: "Unauthorized" });
+    return;
+  }
+
+  // SPEND GUARD: the extra schedule slots for this cron are RETRIES. Two ok
+  // kickoffs today (the real run + one verification wake) mean this slot is
+  // redundant -- skip it instead of waking (and paying for) another full agent
+  // session. Fail-open: any doubt and we run exactly as before. See
+  // workforce-hub.ts for semantics.
+  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
+    json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
     return;
   }
 

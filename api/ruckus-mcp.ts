@@ -252,9 +252,10 @@ const DIAGNOSE_WORKERS: Record<
     label: "Boom screenings pull",
     rerunnable: true,
     note:
-      "KNOWN ISSUE since mid-June: the Boom Partner API rejects every key (HTTP 401); only their " +
-      "sandbox connects. This is a Boom-side/vendor problem — re-running does NOT fix it. " +
-      "Status of the Boom support ticket is the only real fix.",
+      "History: this worker was red June–August 2026 (Boom API 401s) and was fixed via a deeper " +
+      "auth exchange ('[auth exchanged-deep]' in healthy summaries). Healthy since; treat it like " +
+      "any other worker — but if 401s ever return, that is the old Boom-side pattern recurring: " +
+      "flag it as vendor-side rather than re-running repeatedly.",
   },
   "recruiting-sweep": { agentKey: "recruiting-sweep", label: "Daily recruiting sweep", rerunnable: true },
   "caller-name-fill": { agentKey: "caller-name-fill", label: "Caller name fill", rerunnable: true },

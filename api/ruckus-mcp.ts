@@ -10,7 +10,10 @@
  *                              hitting THIS deployment's own /api/cron/* kickoff
  *                              endpoint with the server-side CRON_SECRET (green
  *                              tier; the intake chain is deliberately excluded).
- *   3. `ruckus_publish_blog_pr` — merge ONE open [LEGAL REVIEW]/[CALENDAR REVIEW]
+ *   3. `ruckus_diagnose_worker` — read a worker's recent hub runs (incl. real
+ *                              errorMessage), classify against known failure
+ *                              signatures, recommend rerun vs escalate. Read-only.
+ *   4. `ruckus_publish_blog_pr` — merge ONE open [LEGAL REVIEW]/[CALENDAR REVIEW]
  *                              blog PR on flatfeelandlord-com, only after an
  *                              explicit human approval in-channel (which is
  *                              recorded on the PR as an audit comment). Inert
@@ -210,6 +213,363 @@ async function ruckusRerunWorker(
       };
     }
     return { ok: false, worker, label: entry.label, error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ruckus_diagnose_worker — Ruckus's EYES on a failed worker (read-only)
+// ---------------------------------------------------------------------------
+//
+// Reads a worker's recent run-status rows from the AI Workforce hub (ffl-crm
+// GET /api/v1/agent/run-status — includes the real errorMessage the cron
+// recorded), classifies the failure against FFL's known failure signatures,
+// and returns a plain-English diagnosis + a recommended next step. Read-only:
+// this tool changes nothing; acting on the recommendation is a separate,
+// deliberate call (ruckus_rerun_worker) or an escalation to a human.
+
+const DIAGNOSE_TOOL_NAME = "ruckus_diagnose_worker";
+
+/** worker key (same keys as ruckus_rerun_worker) → hub agentKey + notes. */
+const DIAGNOSE_WORKERS: Record<
+  string,
+  { agentKey: string; label: string; rerunnable: boolean; note?: string }
+> = {
+  "sales-leads": { agentKey: "sales-lead-count", label: "FFL Sales Daily Lead Counter", rerunnable: true },
+  occupancy: { agentKey: "occupancy", label: "FFL Daily Occupancy Counter (AppFolio)", rerunnable: true },
+  showmojo: { agentKey: "showmojo", label: "FFL ShowMojo Agent", rerunnable: true },
+  cfa: { agentKey: "cranbrook-cfa", label: "FFL CFA Daily Numbers (Cranbrook/ResMan)", rerunnable: true },
+  "cf-leads": { agentKey: "cranbrook-cf-leads", label: "FFL CF Leasing Daily Lead Counter", rerunnable: true },
+  onboarding: { agentKey: "onboarding", label: "FFL Owner Onboarding Tracker", rerunnable: true },
+  "boom-screenings": {
+    agentKey: "boom-screenings",
+    label: "Boom screenings pull",
+    rerunnable: true,
+    note:
+      "KNOWN ISSUE since mid-June: the Boom Partner API rejects every key (HTTP 401); only their " +
+      "sandbox connects. This is a Boom-side/vendor problem — re-running does NOT fix it. " +
+      "Status of the Boom support ticket is the only real fix.",
+  },
+  "recruiting-sweep": { agentKey: "recruiting-sweep", label: "Daily recruiting sweep", rerunnable: true },
+  "caller-name-fill": { agentKey: "caller-name-fill", label: "Caller name fill", rerunnable: true },
+  "appfolio-entry": {
+    agentKey: "appfolio-entry",
+    label: "AppFolio owner-intake entry (intake chain)",
+    rerunnable: false,
+    note:
+      "INTAKE CHAIN — diagnosis only, NEVER re-run out of schedule. It writes real owner data into " +
+      "AppFolio and has its own watchdogs. About half of historical intake alerts are false alarms " +
+      "from the watchdogs themselves. Anything here beyond reading status needs a human.",
+  },
+};
+
+/** A known failure signature: pattern → what it means and what to do. */
+interface FailureSignature {
+  kind: string;
+  pattern: RegExp;
+  plainEnglish: string;
+  recommendation: "rerun_likely_fixes" | "wait_then_rerun" | "needs_human" | "needs_engineer";
+}
+
+// Ordered — first match wins. Specific signatures before generic ones.
+const FAILURE_SIGNATURES: FailureSignature[] = [
+  {
+    kind: "passkey_or_2fa",
+    pattern: /passkey|two.?factor|2fa|verification code|mfa|authenticator/i,
+    plainEnglish:
+      "The source system is demanding a passkey/verification code the server cannot provide. This is " +
+      "the recurring AppFolio-style lockout — re-running just hits the same wall.",
+    recommendation: "needs_human",
+  },
+  {
+    kind: "auth_rejected",
+    pattern: /\b401\b|unauthoriz|invalid[^.]*(key|token|credential)|expired[^.]*(key|token|session)|login failed|authentication/i,
+    plainEnglish:
+      "A login or API key was rejected. Re-running won't fix a bad credential — the key or password " +
+      "needs to be checked/rotated by a human.",
+    recommendation: "needs_human",
+  },
+  {
+    kind: "permission_denied",
+    pattern: /\b403\b|forbidden|insufficient scope|permission denied/i,
+    plainEnglish:
+      "Access was denied — the account or API key doesn't have the right permission. A human needs to " +
+      "grant the missing access.",
+    recommendation: "needs_human",
+  },
+  {
+    kind: "rate_limited",
+    pattern: /\b429\b|rate limit|too many requests/i,
+    plainEnglish:
+      "The source system said 'slow down' (rate limit). Waiting a bit and re-running usually works.",
+    recommendation: "wait_then_rerun",
+  },
+  {
+    kind: "sheet_write_shape",
+    pattern: /batchUpdate|\bHTTP 400\b.*(sheet|zapier)|zapier.*400/i,
+    plainEnglish:
+      "The write to Google Sheets was rejected (malformed request — the known Zapier " +
+      "pre-serialized-JSON landmine). This is a code bug, not a flake: an engineer needs to fix the " +
+      "payload; re-running will fail the same way.",
+    recommendation: "needs_engineer",
+  },
+  {
+    kind: "page_changed",
+    pattern: /selector|locator|element not found|no element|waiting for.*(failed|timed? ?out)|navigation (failed|timeout)|page.crash/i,
+    plainEnglish:
+      "The scraper couldn't find what it expected on the page — the website's layout likely changed. " +
+      "One re-run is worth trying (sites glitch), but if it fails the same way twice, the scraper code " +
+      "needs an engineer.",
+    recommendation: "rerun_likely_fixes",
+  },
+  {
+    kind: "transient_network",
+    pattern: /time.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|fetch failed|socket hang up|network|\b50[234]\b|bad gateway|service unavailable|gateway/i,
+    plainEnglish:
+      "The source website or API was slow or briefly down when the worker ran. This is the classic " +
+      "transient failure — a re-run very likely just works.",
+    recommendation: "rerun_likely_fixes",
+  },
+  {
+    kind: "not_configured",
+    pattern: /missing env|not configured|no api key|env var/i,
+    plainEnglish:
+      "The worker is missing a setting (an environment variable or key was removed or never set). A " +
+      "human needs to restore the setting; re-running changes nothing.",
+    recommendation: "needs_human",
+  },
+  {
+    kind: "empty_data",
+    pattern: /no data|empty|zero (rows|records)|nothing (found|returned)/i,
+    plainEnglish:
+      "The worker ran but found no data. Sometimes that's real (nothing happened yesterday); sometimes " +
+      "the source moved. Re-run once; if still empty and that seems wrong, escalate.",
+    recommendation: "rerun_likely_fixes",
+  },
+];
+
+function classifyFailure(text: string): {
+  kind: string;
+  plainEnglish: string;
+  recommendation: string;
+} {
+  for (const sig of FAILURE_SIGNATURES) {
+    if (sig.pattern.test(text)) {
+      return { kind: sig.kind, plainEnglish: sig.plainEnglish, recommendation: sig.recommendation };
+    }
+  }
+  return {
+    kind: "unknown",
+    plainEnglish:
+      "This failure doesn't match any known pattern. Try ONE re-run; if it fails again the same way, " +
+      "report the error text to Mo and recommend an engineer look at it — do not keep re-running.",
+    recommendation: "rerun_likely_fixes",
+  };
+}
+
+const DIAGNOSE_TOOL_DESC =
+  "Diagnose a worker agent's recent runs — your EYES when something fails. Reads the worker's last " +
+  "runs from the AI Workforce hub INCLUDING the real recorded error message, matches the failure " +
+  "against FFL's known failure signatures, and returns a plain-English root-cause read plus a " +
+  "recommended next step (rerun_likely_fixes / wait_then_rerun / needs_human / needs_engineer). " +
+  "Read-only — it changes nothing. Standard flow when a run failed or looks wrong: 1) call this, " +
+  "2) if it says a re-run likely fixes it AND the worker is rerunnable, call ruckus_rerun_worker, " +
+  "3) confirm with get_agent_runs a few minutes later, 4) report the root cause and outcome in plain " +
+  "English — never just 'it failed'. Never re-run a worker this tool marks rerunnable:false " +
+  "(the AppFolio intake chain). If the same worker fails the same way twice after a re-run, stop and " +
+  "escalate — repeated re-runs are noise, not persistence. Workers: " +
+  Object.entries(DIAGNOSE_WORKERS)
+    .map(([k, w]) => `'${k}' (${w.label})`)
+    .join(", ") +
+  ". Args: { worker } (required). Returns { worker, label, rerunnable, workerNote, latestRun, " +
+  "recentRuns, diagnosis }.";
+
+const DIAGNOSE_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    worker: {
+      type: "string",
+      enum: Object.keys(DIAGNOSE_WORKERS),
+      description: "Which worker to diagnose.",
+    },
+  },
+  required: ["worker"],
+  additionalProperties: false,
+};
+
+/** ffl-crm hub base + API key (mirrors workforce-hub.ts, which keeps them private). */
+function diagHubBaseUrl(): string {
+  const vest = (process.env.VESTLAUNCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (vest) return vest;
+  const legacy = (process.env.AGENT_OS_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (legacy) return legacy;
+  return "https://crm.vestlaunch.com";
+}
+function diagHubApiKey(): string {
+  const primary = (process.env.FFL_WORKFORCE_API_KEY ?? "").trim();
+  if (primary) return primary;
+  return (process.env.VESTLAUNCH_API_KEY ?? "").trim();
+}
+
+interface HubRunRow {
+  agentKey?: string;
+  status?: string;
+  summary?: string | null;
+  errorMessage?: string | null;
+  needsHuman?: boolean;
+  ranAt?: string;
+  durationMs?: number | null;
+}
+
+async function ruckusDiagnoseWorker(
+  args: Record<string, unknown>,
+  forwardToken?: string,
+): Promise<unknown> {
+  // Same caller gate as rerun/publish.
+  const expectedBearer = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  if (!expectedBearer) {
+    throw new Error("ruckus_diagnose_worker is not configured: RUCKUS_SEND_TOKEN missing.");
+  }
+  if ((forwardToken ?? "").trim() !== expectedBearer) {
+    throw new Error("ruckus_diagnose_worker: unauthorized bearer.");
+  }
+
+  const worker = typeof args.worker === "string" ? args.worker.trim() : "";
+  const entry = DIAGNOSE_WORKERS[worker];
+  if (!entry) {
+    throw new Error(
+      `Unknown worker '${worker}'. Valid workers: ${Object.keys(DIAGNOSE_WORKERS).join(", ")}.`,
+    );
+  }
+
+  const apiKey = diagHubApiKey();
+  if (!apiKey) {
+    return {
+      ok: false,
+      error:
+        "Not configured: no hub API key (FFL_WORKFORCE_API_KEY) in this deployment's env — " +
+        "tell Mo the diagnosis tool can't read the hub yet.",
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(
+      `${diagHubBaseUrl()}/api/v1/agent/run-status?agentKey=${encodeURIComponent(entry.agentKey)}&limit=8`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}`, "User-Agent": "ruckus-mcp-diagnose/0.1.0" },
+        signal: controller.signal,
+      },
+    );
+    const text = await res.text();
+    if (res.status === 403) {
+      return {
+        ok: false,
+        error:
+          "The hub API key was refused (needs the agent:read scope). Tell Mo: in the CRM's API key " +
+          "settings, the workforce key needs 'agent:read' added — one-time fix.",
+      };
+    }
+    if (!res.ok) {
+      return { ok: false, error: `Hub read failed (HTTP ${res.status}): ${text.slice(0, 200)}` };
+    }
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return { ok: false, error: "Hub returned unparseable data." };
+    }
+    const rows: HubRunRow[] = Array.isArray((parsed as { data?: unknown })?.data)
+      ? ((parsed as { data: HubRunRow[] }).data)
+      : Array.isArray(parsed)
+        ? (parsed as HubRunRow[])
+        : [];
+
+    if (rows.length === 0) {
+      return {
+        ok: true,
+        worker,
+        label: entry.label,
+        rerunnable: entry.rerunnable,
+        workerNote: entry.note,
+        diagnosis: {
+          kind: "no_runs_recorded",
+          plainEnglish:
+            "The hub has no recorded runs for this worker. Either it has never reported in, or its " +
+            "kickoff is failing before it can even log — that itself is worth flagging to Mo.",
+          recommendation: entry.rerunnable ? "rerun_likely_fixes" : "needs_human",
+        },
+        recentRuns: [],
+      };
+    }
+
+    const compact = rows.map((r) => ({
+      status: r.status,
+      ranAt: r.ranAt,
+      needsHuman: r.needsHuman,
+      summary: (r.summary ?? "").toString().slice(0, 300),
+      errorMessage: (r.errorMessage ?? "").toString().slice(0, 500),
+    }));
+    const latest = compact[0];
+    const latestFailed = rows.find((r) => r.status !== "ok");
+
+    let diagnosis: { kind: string; plainEnglish: string; recommendation: string };
+    if (latest.status === "ok") {
+      diagnosis = {
+        kind: "healthy_now",
+        plainEnglish:
+          "The most recent run succeeded — the worker is healthy right now. If someone reported a " +
+          "problem, it either self-recovered or the problem is elsewhere (check the numbers, not the worker).",
+        recommendation: "none",
+      };
+    } else {
+      const evidence = `${latest.errorMessage} ${latest.summary}`;
+      diagnosis = classifyFailure(evidence);
+      // Two same-signature failures in a row → stop recommending re-runs.
+      const prior = compact[1];
+      if (
+        prior &&
+        prior.status !== "ok" &&
+        diagnosis.recommendation === "rerun_likely_fixes" &&
+        classifyFailure(`${prior.errorMessage} ${prior.summary}`).kind === diagnosis.kind
+      ) {
+        diagnosis = {
+          kind: `${diagnosis.kind}_repeated`,
+          plainEnglish:
+            diagnosis.plainEnglish +
+            " HOWEVER: it has now failed the same way twice in a row, so a re-run is unlikely to " +
+            "help — escalate with the error text instead of re-running again.",
+          recommendation: "needs_engineer",
+        };
+      }
+    }
+    if (!entry.rerunnable && diagnosis.recommendation === "rerun_likely_fixes") {
+      diagnosis = { ...diagnosis, recommendation: "needs_human" };
+    }
+
+    return {
+      ok: true,
+      worker,
+      label: entry.label,
+      rerunnable: entry.rerunnable,
+      workerNote: entry.note,
+      latestRun: latest,
+      latestFailedRun: latestFailed
+        ? {
+            status: latestFailed.status,
+            ranAt: latestFailed.ranAt,
+            errorMessage: (latestFailed.errorMessage ?? "").toString().slice(0, 500),
+            summary: (latestFailed.summary ?? "").toString().slice(0, 300),
+          }
+        : null,
+      recentRuns: compact,
+      diagnosis,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, worker, error: `Diagnosis fetch failed: ${msg}` };
   } finally {
     clearTimeout(timer);
   }
@@ -480,13 +840,19 @@ function buildServer(forwardToken?: string): Server {
     tools: [
       { name: TOOL_NAME, description: TOOL_DESC, inputSchema: TOOL_SCHEMA },
       { name: RERUN_TOOL_NAME, description: RERUN_TOOL_DESC, inputSchema: RERUN_TOOL_SCHEMA },
+      { name: DIAGNOSE_TOOL_NAME, description: DIAGNOSE_TOOL_DESC, inputSchema: DIAGNOSE_TOOL_SCHEMA },
       { name: PUBLISH_TOOL_NAME, description: PUBLISH_TOOL_DESC, inputSchema: PUBLISH_TOOL_SCHEMA },
     ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: rawArgs } = req.params;
-    if (name !== TOOL_NAME && name !== RERUN_TOOL_NAME && name !== PUBLISH_TOOL_NAME) {
+    if (
+      name !== TOOL_NAME &&
+      name !== RERUN_TOOL_NAME &&
+      name !== DIAGNOSE_TOOL_NAME &&
+      name !== PUBLISH_TOOL_NAME
+    ) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
     try {
@@ -494,9 +860,11 @@ function buildServer(forwardToken?: string): Server {
       const result =
         name === PUBLISH_TOOL_NAME
           ? await ruckusPublishBlogPr(args, forwardToken)
-          : name === RERUN_TOOL_NAME
-            ? await ruckusRerunWorker(args, forwardToken)
-            : await ruckusSend(args, forwardToken);
+          : name === DIAGNOSE_TOOL_NAME
+            ? await ruckusDiagnoseWorker(args, forwardToken)
+            : name === RERUN_TOOL_NAME
+              ? await ruckusRerunWorker(args, forwardToken)
+              : await ruckusSend(args, forwardToken);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {

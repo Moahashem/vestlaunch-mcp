@@ -10,6 +10,11 @@
  *                              hitting THIS deployment's own /api/cron/* kickoff
  *                              endpoint with the server-side CRON_SECRET (green
  *                              tier; the intake chain is deliberately excluded).
+ *   3. `ruckus_publish_blog_pr` — merge ONE open [LEGAL REVIEW]/[CALENDAR REVIEW]
+ *                              blog PR on flatfeelandlord-com, only after an
+ *                              explicit human approval in-channel (which is
+ *                              recorded on the PR as an audit comment). Inert
+ *                              until FFL_GITHUB_TOKEN is set.
  * We keep this SEPARATE from the shared read MCP (api/mcp.ts) so Ruckus's
  * "acting" path can never affect the read tools the other FFL agents rely on.
  *
@@ -210,6 +215,205 @@ async function ruckusRerunWorker(
   }
 }
 
+// ---------------------------------------------------------------------------
+// ruckus_publish_blog_pr — publish a held blog post AFTER explicit human OK
+// ---------------------------------------------------------------------------
+//
+// The blog drafter (GitHub Action in Moahashem/flatfeelandlord-com) holds
+// statutory/legal-adjacent posts as open "[LEGAL REVIEW]" / "[CALENDAR REVIEW]"
+// PRs until a human signs off. This tool is the LAST INCH of that approval
+// loop: when Mo or Yuliana explicitly approves a specific post in the channel
+// ("push it live"), Ruckus merges that one PR. The HUMAN decision is the
+// red-tier sign-off; this tool only executes it, and its gates make it unable
+// to do anything else:
+//
+//   • hardcoded to the flatfeelandlord-com repo — no other repo reachable
+//   • the PR must be OPEN and titled "[LEGAL REVIEW]" or "[CALENDAR REVIEW]"
+//   • GitHub must report it mergeable with green checks (mergeable_state clean)
+//   • an audit comment (who approved + their verbatim words) is posted on the
+//     PR before merging, so the sign-off trail lives where the content lives
+//   • caller bearer must equal RUCKUS_SEND_TOKEN (same gate as rerun)
+//   • inert until FFL_GITHUB_TOKEN is set in this deployment's env — use a
+//     fine-grained PAT scoped to ONLY flatfeelandlord-com (Contents +
+//     Pull requests: read/write). The model never sees the token.
+
+const PUBLISH_TOOL_NAME = "ruckus_publish_blog_pr";
+const PUBLISH_REPO = "Moahashem/flatfeelandlord-com";
+const PUBLISH_TITLE_RE = /\[(LEGAL|CALENDAR) REVIEW\]/i;
+
+const PUBLISH_TOOL_DESC =
+  "Publish (merge) ONE blog post PR on the flatfeelandlord-com website that is being held " +
+  "for review — ONLY after Mo or Yuliana has explicitly approved THAT SPECIFIC post in the " +
+  "channel (e.g. 'push it live', 'approved, ship it'). The human's message is the required " +
+  "legal sign-off: NEVER call this on your own judgment, on a hunch, or because a post " +
+  "seems fine — no explicit human approval in this conversation, no call. Pass their " +
+  "approval verbatim: it is posted on the PR as the audit record. Only works on OPEN PRs " +
+  `in ${PUBLISH_REPO} titled [LEGAL REVIEW] or [CALENDAR REVIEW] with green checks; ` +
+  "refuses everything else. Args: { pr_number, approved_by, approval_quote } (all " +
+  "required; approved_by is the human's name, approval_quote their exact words). " +
+  "Returns { ok, merged, title, url } or a refusal reason. After success, confirm to the " +
+  "channel that the post is live (the site deploys automatically within a few minutes).";
+
+const PUBLISH_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    pr_number: {
+      type: "number",
+      description: "The PR number to publish (from the alert, e.g. 532).",
+    },
+    approved_by: {
+      type: "string",
+      description: "Name of the human who approved in-channel (e.g. 'Mo').",
+    },
+    approval_quote: {
+      type: "string",
+      description:
+        "The human's approval message, verbatim — posted on the PR as the audit record.",
+    },
+  },
+  required: ["pr_number", "approved_by", "approval_quote"],
+  additionalProperties: false,
+};
+
+async function githubApi(
+  token: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; json: unknown }> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "ruckus-mcp-publish/0.1.0",
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = { raw: text.slice(0, 300) };
+  }
+  return { status: res.status, json };
+}
+
+async function ruckusPublishBlogPr(
+  args: Record<string, unknown>,
+  forwardToken?: string,
+): Promise<unknown> {
+  // Gate 1: caller must be the Ruckus vault credential (same as rerun).
+  const expectedBearer = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  if (!expectedBearer) {
+    throw new Error(
+      "ruckus_publish_blog_pr is not configured: RUCKUS_SEND_TOKEN missing from this MCP's env.",
+    );
+  }
+  if ((forwardToken ?? "").trim() !== expectedBearer) {
+    throw new Error("ruckus_publish_blog_pr: unauthorized bearer.");
+  }
+
+  // Gate 2: inert until a repo-scoped GitHub token exists server-side.
+  const ghToken = (process.env.FFL_GITHUB_TOKEN ?? "").trim();
+  if (!ghToken) {
+    return {
+      ok: false,
+      error:
+        "Not configured yet: FFL_GITHUB_TOKEN is missing from this deployment's env. " +
+        "Tell Mo the publish lever needs its GitHub key added in Vercel before it can work.",
+    };
+  }
+
+  const prNumber = typeof args.pr_number === "number" ? Math.trunc(args.pr_number) : NaN;
+  const approvedBy = typeof args.approved_by === "string" ? args.approved_by.trim() : "";
+  const approvalQuote =
+    typeof args.approval_quote === "string" ? args.approval_quote.trim() : "";
+  if (!Number.isFinite(prNumber) || prNumber <= 0) {
+    throw new Error("ruckus_publish_blog_pr requires a valid pr_number.");
+  }
+  if (!approvedBy || !approvalQuote) {
+    throw new Error(
+      "ruckus_publish_blog_pr requires approved_by and approval_quote — the human approval " +
+        "IS the sign-off; do not call without it.",
+    );
+  }
+
+  // Gate 3: the PR itself must be a held review PR, open, mergeable, green.
+  const pr = await githubApi(ghToken, "GET", `/repos/${PUBLISH_REPO}/pulls/${prNumber}`);
+  if (pr.status !== 200) {
+    return { ok: false, error: `Could not load PR #${prNumber} (HTTP ${pr.status}).` };
+  }
+  const p = pr.json as {
+    state?: string;
+    title?: string;
+    merged?: boolean;
+    mergeable_state?: string;
+    html_url?: string;
+    head?: { ref?: string };
+  };
+  if (p.merged) {
+    return { ok: true, merged: true, title: p.title, url: p.html_url, note: "Already published." };
+  }
+  if (p.state !== "open") {
+    return { ok: false, error: `PR #${prNumber} is not open (state: ${p.state}).`, title: p.title };
+  }
+  if (!PUBLISH_TITLE_RE.test(p.title ?? "")) {
+    return {
+      ok: false,
+      error:
+        `PR #${prNumber} ("${p.title}") is not a held review PR — this tool only publishes ` +
+        "PRs titled [LEGAL REVIEW] or [CALENDAR REVIEW]. Anything else needs Mo directly.",
+    };
+  }
+  if (p.mergeable_state !== "clean") {
+    return {
+      ok: false,
+      error:
+        `PR #${prNumber} is not cleanly mergeable right now (state: ` +
+        `${p.mergeable_state ?? "unknown"}). Checks may still be running or something needs ` +
+        "a human look — report this back instead of retrying blindly.",
+      title: p.title,
+      url: p.html_url,
+    };
+  }
+
+  // Audit trail BEFORE merging: the sign-off lives on the PR itself.
+  await githubApi(ghToken, "POST", `/repos/${PUBLISH_REPO}/issues/${prNumber}/comments`, {
+    body:
+      `✅ **Published on explicit in-channel approval.**\n\n` +
+      `Approved by: **${approvedBy}**\n` +
+      `Their words: "${approvalQuote.slice(0, 500)}"\n\n` +
+      `_Merged by Ruckus (FFL Chief of Staff) via ruckus_publish_blog_pr._`,
+  });
+
+  const merge = await githubApi(ghToken, "PUT", `/repos/${PUBLISH_REPO}/pulls/${prNumber}/merge`, {
+    merge_method: "squash",
+  });
+  if (merge.status !== 200) {
+    return {
+      ok: false,
+      error: `Merge failed (HTTP ${merge.status}): ${JSON.stringify(merge.json).slice(0, 300)}`,
+      title: p.title,
+      url: p.html_url,
+    };
+  }
+
+  // Best-effort branch cleanup — a failure here is cosmetic, never surfaced as an error.
+  if (p.head?.ref) {
+    await githubApi(
+      ghToken,
+      "DELETE",
+      `/repos/${PUBLISH_REPO}/git/refs/heads/${encodeURIComponent(p.head.ref)}`,
+    ).catch(() => undefined);
+  }
+
+  return { ok: true, merged: true, title: p.title, url: p.html_url };
+}
+
 function baseUrl(): string {
   const explicit = (process.env.RUCKUS_SEND_BASE_URL ?? "").trim().replace(/\/+$/, "");
   if (explicit) return explicit;
@@ -276,20 +480,23 @@ function buildServer(forwardToken?: string): Server {
     tools: [
       { name: TOOL_NAME, description: TOOL_DESC, inputSchema: TOOL_SCHEMA },
       { name: RERUN_TOOL_NAME, description: RERUN_TOOL_DESC, inputSchema: RERUN_TOOL_SCHEMA },
+      { name: PUBLISH_TOOL_NAME, description: PUBLISH_TOOL_DESC, inputSchema: PUBLISH_TOOL_SCHEMA },
     ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: rawArgs } = req.params;
-    if (name !== TOOL_NAME && name !== RERUN_TOOL_NAME) {
+    if (name !== TOOL_NAME && name !== RERUN_TOOL_NAME && name !== PUBLISH_TOOL_NAME) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
     try {
       const args = (rawArgs ?? {}) as Record<string, unknown>;
       const result =
-        name === RERUN_TOOL_NAME
-          ? await ruckusRerunWorker(args, forwardToken)
-          : await ruckusSend(args, forwardToken);
+        name === PUBLISH_TOOL_NAME
+          ? await ruckusPublishBlogPr(args, forwardToken)
+          : name === RERUN_TOOL_NAME
+            ? await ruckusRerunWorker(args, forwardToken)
+            : await ruckusSend(args, forwardToken);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {

@@ -13,7 +13,12 @@
  *   3. `ruckus_diagnose_worker` — read a worker's recent hub runs (incl. real
  *                              errorMessage), classify against known failure
  *                              signatures, recommend rerun vs escalate. Read-only.
- *   4. `ruckus_publish_blog_pr` — merge ONE open [LEGAL REVIEW]/[CALENDAR REVIEW]
+ *   4. `ruckus_call_engineer` — dispatch the Engineer On Call GitHub workflow
+ *                              (this repo) to investigate a failing worker and
+ *                              open a fix PR / needs-human issue, only on
+ *                              explicit human approval. Inert until
+ *                              FFL_ENGINEER_GITHUB_TOKEN is set.
+ *   5. `ruckus_publish_blog_pr` — merge ONE open [LEGAL REVIEW]/[CALENDAR REVIEW]
  *                              blog PR on flatfeelandlord-com, only after an
  *                              explicit human approval in-channel (which is
  *                              recorded on the PR as an audit comment). Inert
@@ -576,6 +581,151 @@ async function ruckusDiagnoseWorker(
 }
 
 // ---------------------------------------------------------------------------
+// ruckus_call_engineer — summon the repair agent AFTER explicit human OK
+// ---------------------------------------------------------------------------
+//
+// Dispatches the "Engineer On Call" GitHub Actions workflow in THIS repo
+// (.github/workflows/engineer-on-call.yml): a Claude engineer checks out the
+// code, investigates the failing worker, and opens a fix PR (never merges) or
+// a needs-human issue. The human approval in-channel is the authorization;
+// this tool only executes it.
+//
+// Gates: caller bearer must equal RUCKUS_SEND_TOKEN; requires requested_by +
+// request_quote (the human's verbatim words — recorded in the workflow run);
+// inert until FFL_ENGINEER_GITHUB_TOKEN is set (fine-grained PAT scoped to
+// ONLY vestlaunch-mcp with Actions read/write — separate from the blog
+// publisher token, so neither key can do the other's job).
+
+const ENGINEER_TOOL_NAME = "ruckus_call_engineer";
+const ENGINEER_REPO = "Moahashem/vestlaunch-mcp";
+const ENGINEER_WORKFLOW_FILE = "engineer-on-call.yml";
+
+const ENGINEER_TOOL_DESC =
+  "Summon the on-call AI engineer for a worker whose failure is a CODE problem — use only after " +
+  "ruckus_diagnose_worker says needs_engineer (or a re-run failed the same way twice) AND a human " +
+  "(Mo or Yuliana) explicitly told you to get it fixed. Their message is the authorization: NEVER " +
+  "call this on your own judgment, and pass their words verbatim. The engineer investigates the " +
+  "code, then opens a PULL REQUEST proposing a fix (it never merges — a human reviews) or a " +
+  "needs-human issue, usually within ~15-30 minutes, and posts a note to this channel when done. " +
+  "One dispatch per incident — do not re-dispatch for the same failure while a fix PR is open. " +
+  "Args: { worker, requested_by, request_quote, diagnosis?, error_text? } — pass the diagnosis " +
+  "kind/recommendation and the error text from ruckus_diagnose_worker so the engineer starts with " +
+  "evidence. Returns { ok, dispatched, runsUrl } or a refusal reason. After dispatching, tell the " +
+  "requester the engineer is on it and roughly when to expect the proposal.";
+
+const ENGINEER_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    worker: {
+      type: "string",
+      enum: Object.keys(DIAGNOSE_WORKERS),
+      description: "Which worker the engineer should investigate.",
+    },
+    requested_by: {
+      type: "string",
+      description: "Name of the human who approved calling the engineer (e.g. 'Mo').",
+    },
+    request_quote: {
+      type: "string",
+      description: "The human's request, verbatim — recorded with the dispatch.",
+    },
+    diagnosis: {
+      type: "string",
+      description: "Diagnosis summary from ruckus_diagnose_worker (kind + recommendation).",
+    },
+    error_text: {
+      type: "string",
+      description: "The recorded error message(s) from ruckus_diagnose_worker.",
+    },
+  },
+  required: ["worker", "requested_by", "request_quote"],
+  additionalProperties: false,
+};
+
+async function ruckusCallEngineer(
+  args: Record<string, unknown>,
+  forwardToken?: string,
+): Promise<unknown> {
+  // Gate 1: caller must be the Ruckus vault credential.
+  const expectedBearer = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  if (!expectedBearer) {
+    throw new Error("ruckus_call_engineer is not configured: RUCKUS_SEND_TOKEN missing.");
+  }
+  if ((forwardToken ?? "").trim() !== expectedBearer) {
+    throw new Error("ruckus_call_engineer: unauthorized bearer.");
+  }
+
+  // Gate 2: inert until the dedicated dispatch token exists server-side.
+  const ghToken = (process.env.FFL_ENGINEER_GITHUB_TOKEN ?? "").trim();
+  if (!ghToken) {
+    return {
+      ok: false,
+      error:
+        "Not configured yet: FFL_ENGINEER_GITHUB_TOKEN is missing from this deployment's env. " +
+        "Tell Mo the engineer lever needs its GitHub key added in Vercel before it can work.",
+    };
+  }
+
+  const worker = typeof args.worker === "string" ? args.worker.trim() : "";
+  if (!DIAGNOSE_WORKERS[worker]) {
+    throw new Error(
+      `Unknown worker '${worker}'. Valid workers: ${Object.keys(DIAGNOSE_WORKERS).join(", ")}.`,
+    );
+  }
+  const requestedBy = typeof args.requested_by === "string" ? args.requested_by.trim() : "";
+  const requestQuote = typeof args.request_quote === "string" ? args.request_quote.trim() : "";
+  if (!requestedBy || !requestQuote) {
+    throw new Error(
+      "ruckus_call_engineer requires requested_by and request_quote — the human request IS the " +
+        "authorization; do not call without it.",
+    );
+  }
+  const diagnosis =
+    typeof args.diagnosis === "string" && args.diagnosis.trim()
+      ? args.diagnosis.trim().slice(0, 1000)
+      : "(none provided)";
+  const errorText =
+    typeof args.error_text === "string" && args.error_text.trim()
+      ? args.error_text.trim().slice(0, 1500)
+      : "(none provided)";
+
+  const dispatch = await githubApi(
+    ghToken,
+    "POST",
+    `/repos/${ENGINEER_REPO}/actions/workflows/${ENGINEER_WORKFLOW_FILE}/dispatches`,
+    {
+      ref: "main",
+      inputs: {
+        worker,
+        diagnosis,
+        error_text: errorText,
+        requested_by: `${requestedBy} — "${requestQuote.slice(0, 300)}"`,
+      },
+    },
+  );
+
+  // GitHub returns 204 No Content on a successful dispatch.
+  if (dispatch.status !== 204) {
+    return {
+      ok: false,
+      error: `Dispatch failed (HTTP ${dispatch.status}): ${JSON.stringify(dispatch.json).slice(0, 300)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    dispatched: true,
+    worker,
+    label: DIAGNOSE_WORKERS[worker].label,
+    runsUrl: `https://github.com/${ENGINEER_REPO}/actions/workflows/${ENGINEER_WORKFLOW_FILE}`,
+    note:
+      "Engineer dispatched. Expect a fix PR or a needs-human issue in roughly 15-30 minutes; it " +
+      "posts a note to this channel when done (if notification is configured). Do not re-dispatch " +
+      "for this same incident.",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // ruckus_publish_blog_pr — publish a held blog post AFTER explicit human OK
 // ---------------------------------------------------------------------------
 //
@@ -841,6 +991,7 @@ function buildServer(forwardToken?: string): Server {
       { name: TOOL_NAME, description: TOOL_DESC, inputSchema: TOOL_SCHEMA },
       { name: RERUN_TOOL_NAME, description: RERUN_TOOL_DESC, inputSchema: RERUN_TOOL_SCHEMA },
       { name: DIAGNOSE_TOOL_NAME, description: DIAGNOSE_TOOL_DESC, inputSchema: DIAGNOSE_TOOL_SCHEMA },
+      { name: ENGINEER_TOOL_NAME, description: ENGINEER_TOOL_DESC, inputSchema: ENGINEER_TOOL_SCHEMA },
       { name: PUBLISH_TOOL_NAME, description: PUBLISH_TOOL_DESC, inputSchema: PUBLISH_TOOL_SCHEMA },
     ],
   }));
@@ -851,6 +1002,7 @@ function buildServer(forwardToken?: string): Server {
       name !== TOOL_NAME &&
       name !== RERUN_TOOL_NAME &&
       name !== DIAGNOSE_TOOL_NAME &&
+      name !== ENGINEER_TOOL_NAME &&
       name !== PUBLISH_TOOL_NAME
     ) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
@@ -860,11 +1012,13 @@ function buildServer(forwardToken?: string): Server {
       const result =
         name === PUBLISH_TOOL_NAME
           ? await ruckusPublishBlogPr(args, forwardToken)
-          : name === DIAGNOSE_TOOL_NAME
-            ? await ruckusDiagnoseWorker(args, forwardToken)
-            : name === RERUN_TOOL_NAME
-              ? await ruckusRerunWorker(args, forwardToken)
-              : await ruckusSend(args, forwardToken);
+          : name === ENGINEER_TOOL_NAME
+            ? await ruckusCallEngineer(args, forwardToken)
+            : name === DIAGNOSE_TOOL_NAME
+              ? await ruckusDiagnoseWorker(args, forwardToken)
+              : name === RERUN_TOOL_NAME
+                ? await ruckusRerunWorker(args, forwardToken)
+                : await ruckusSend(args, forwardToken);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {

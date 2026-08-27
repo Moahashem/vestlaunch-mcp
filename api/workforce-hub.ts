@@ -96,3 +96,70 @@ export async function logAgentRun(report: AgentRunReport): Promise<void> {
     clearTimeout(timer);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Spend guard — skip redundant retry kickoffs
+// ---------------------------------------------------------------------------
+//
+// Most daily crons have several schedule slots (see vercel.json): the first is
+// the real run, the rest are RETRY slots. Every slot used to wake a full
+// Managed Agent session even when the day's work was already done — the agent
+// woke, read the sheet, said "already done", and billed us anyway.
+//
+// IMPORTANT SEMANTICS: a cron's own "ok" row means the KICKOFF succeeded, not
+// that the agent finished its work (agents don't self-report completion yet).
+// So we deliberately allow TWO successful kickoffs per day — the real run plus
+// ONE verification wake that re-reads the sheet and fills any gaps — and only
+// skip the slots after that. This keeps the mid-run-crash safety net while
+// cutting the redundant wakes.
+//
+// Fail-open by design: if the hub can't be read (missing key, missing
+// agent:read scope, network), we return false and the kickoff proceeds exactly
+// as before this guard existed. A guard must never be the reason a worker
+// didn't run.
+
+/** ISO timestamp for the most recent midnight in America/Chicago. */
+function startOfTodayChicagoISO(): string {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(now);
+  const get = (t: string) =>
+    Number.parseInt(parts.find((p) => p.type === t)?.value ?? "0", 10);
+  const secondsSinceMidnight = (get("hour") % 24) * 3600 + get("minute") * 60 + get("second");
+  return new Date(now.getTime() - secondsSinceMidnight * 1000).toISOString();
+}
+
+/**
+ * True when this agentKey already has 2+ successful kickoffs today (America/
+ * Chicago) — meaning the real run AND its verification wake both happened, so
+ * any further retry slot is redundant. False (fail-open) on any read problem.
+ */
+export async function shouldSkipRedundantKickoff(agentKey: string): Promise<boolean> {
+  const apiKey = hubApiKey();
+  if (!apiKey) return false;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const url =
+      `${hubBaseUrl()}/api/v1/agent/run-status?agentKey=${encodeURIComponent(agentKey)}` +
+      `&status=ok&since=${encodeURIComponent(startOfTodayChicagoISO())}&limit=10`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (!res.ok) return false; // 403 (no agent:read) or anything else → fail open
+    const body = (await res.json()) as { data?: unknown[] };
+    const okRuns = Array.isArray(body?.data) ? body.data.length : 0;
+    return okRuns >= 2;
+  } catch {
+    return false; // fail open — never block a run because the guard errored
+  } finally {
+    clearTimeout(timer);
+  }
+}

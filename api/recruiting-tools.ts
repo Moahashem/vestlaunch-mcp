@@ -676,14 +676,52 @@ export interface ContactHit {
  */
 const CONTACT_INDEX_KEY = "videoask_contact_index";
 const CONTACT_INDEX_MAX_AGE_MS = 12 * 3600 * 1000;
+/** A FULL all-pages rebuild this often heals any drift (deleted/edited
+ *  contacts upstream). Between fulls, refreshes are INCREMENTAL — new rows
+ *  only — which cuts the daily VideoAsk call count from ~80-100 (every
+ *  contact of every form re-paged) to ~15-20 (one probe page per form).
+ *  Added 2026-08-27 at Mo's request: the old daily full rebuild was the
+ *  single biggest consumer of the Zapier task budget. */
+const CONTACT_INDEX_FULL_REBUILD_MS = 7 * 24 * 3600 * 1000;
 const CONTACT_PAGE_LIMIT = 100;
 const MAX_CONTACT_PAGES_PER_FORM = 40;
 
+interface ContactRow {
+  n: string;
+  e: string;
+  c: string;
+  f: string;
+}
+
 interface ContactIndex {
   updated_at: string;
+  /** When the last FULL rebuild ran. Absent on legacy caches → do a full. */
+  full_rebuilt_at?: string;
   total: number;
   forms: number;
-  contacts: Array<{ n: string; e: string; c: string; f: string }>;
+  contacts: ContactRow[];
+  /** Per-form bookkeeping for incremental refresh, keyed by form_id.
+   *  Absent on legacy caches → do a full. */
+  per_form?: Record<string, { title: string; count: number; max_c: string }>;
+}
+
+/** Identity of a contact row for append-only merging. Exported for tests. */
+export function contactKey(r: ContactRow): string {
+  return [r.n, r.e, r.c, r.f].join("|");
+}
+
+/**
+ * Which way does a contacts page sort? Decided EMPIRICALLY per form per run —
+ * the API's sort order for /contacts was never verified live (answers are
+ * newest-first, contacts unknown), so we detect instead of assuming.
+ * Exported for tests.
+ */
+export function detectPageOrder(rows: ContactRow[]): "newest_first" | "oldest_first" | "unknown" {
+  if (rows.length < 2) return "unknown";
+  const first = Date.parse(rows[0].c);
+  const last = Date.parse(rows[rows.length - 1].c);
+  if (Number.isNaN(first) || Number.isNaN(last) || first === last) return "unknown";
+  return first > last ? "newest_first" : "oldest_first";
 }
 
 async function listVideoaskForms(): Promise<Array<{ form_id: string; title: string }>> {
@@ -698,9 +736,12 @@ async function listVideoaskForms(): Promise<Array<{ form_id: string; title: stri
   })).filter((f) => f.form_id);
 }
 
-async function fetchFormContacts(form: { form_id: string; title: string }): Promise<ContactIndex["contacts"]> {
+async function fetchFormContacts(
+  form: { form_id: string; title: string },
+  startPage = 0,
+): Promise<ContactIndex["contacts"]> {
   const out: ContactIndex["contacts"] = [];
-  for (let pageNo = 0; pageNo < MAX_CONTACT_PAGES_PER_FORM; pageNo++) {
+  for (let pageNo = startPage; pageNo < startPage + MAX_CONTACT_PAGES_PER_FORM; pageNo++) {
     const page = await videoaskGet(
       `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=${pageNo * CONTACT_PAGE_LIMIT}`,
     );
@@ -719,6 +760,75 @@ async function fetchFormContacts(form: { form_id: string; title: string }): Prom
   return out;
 }
 
+/**
+ * Incrementally top up one form's rows. Returns ONLY rows not already in
+ * `existingKeys`. Throws on anything it cannot reason about — the caller
+ * falls back to a full rebuild, so every failure mode ends in correctness.
+ */
+async function fetchFormContactsIncremental(
+  form: { form_id: string; title: string },
+  known: { count: number },
+  existingKeys: Set<string>,
+): Promise<ContactRow[]> {
+  const page0 = await videoaskGet(
+    `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=0`,
+  );
+  const rows0raw = (page0.results ?? page0.contents ?? []) as Array<Record<string, unknown>>;
+  if (!Array.isArray(rows0raw)) throw new Error(`form ${form.form_id}: page 0 not an array`);
+  const toRow = (r: Record<string, unknown>): ContactRow => ({
+    n: String(r.name ?? r.contact_name ?? "").trim().toLowerCase(),
+    e: String(r.email ?? r.contact_email ?? "").trim().toLowerCase(),
+    c: String(r.created_at ?? ""),
+    f: form.title,
+  });
+  const rows0 = rows0raw.map(toRow);
+  if (rows0.length === 0) return []; // form (still) empty — keep whatever we had
+  // Whole form fits on one page → that page is the complete current state.
+  if (rows0.length < CONTACT_PAGE_LIMIT && !page0.next) {
+    return rows0.filter((r) => !existingKeys.has(contactKey(r)));
+  }
+  const order = detectPageOrder(rows0);
+  if (order === "unknown") throw new Error(`form ${form.form_id}: cannot detect page order`);
+
+  const added: ContactRow[] = [];
+  if (order === "newest_first") {
+    // New rows live at the front; stop at the first page that overlaps cache.
+    let pageNo = 0;
+    let rows = rows0;
+    let next = page0.next;
+    for (;;) {
+      let sawKnown = false;
+      for (const r of rows) {
+        if (existingKeys.has(contactKey(r))) sawKnown = true;
+        else added.push(r);
+      }
+      if (sawKnown || !next) break;
+      pageNo += 1;
+      if (pageNo >= MAX_CONTACT_PAGES_PER_FORM) throw new Error(`form ${form.form_id}: incremental page cap hit`);
+      const page = await videoaskGet(
+        `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=${pageNo * CONTACT_PAGE_LIMIT}`,
+      );
+      const raw = (page.results ?? page.contents ?? []) as Array<Record<string, unknown>>;
+      if (!Array.isArray(raw) || raw.length === 0) break;
+      rows = raw.map(toRow);
+      next = page.next;
+    }
+  } else {
+    // Oldest-first: new rows live at the tail; start where the cache ends.
+    // (Off-by-a-page is fine — known rows are filtered by key. If upstream
+    // deletions shrank the list our start page may be empty; step back one
+    // page once, and the weekly full rebuild heals anything deeper.)
+    let startPage = Math.floor(known.count / CONTACT_PAGE_LIMIT);
+    let tail = await fetchFormContacts(form, startPage);
+    if (tail.length === 0 && startPage > 0) {
+      startPage -= 1;
+      tail = await fetchFormContacts(form, startPage);
+    }
+    for (const r of tail) if (!existingKeys.has(contactKey(r))) added.push(r);
+  }
+  return added;
+}
+
 async function getContactIndex(): Promise<ContactIndex> {
   const cached = (await readStateKey(CONTACT_INDEX_KEY)) as ContactIndex | undefined;
   if (
@@ -729,18 +839,88 @@ async function getContactIndex(): Promise<ContactIndex> {
   ) {
     return cached;
   }
+
+  // ── Incremental path (2026-08-27): stale-but-usable cache → fetch only new
+  // rows. Append-only: cached rows are never dropped here, so dedup can only
+  // get MORE conservative, never less. Any surprise → full rebuild below.
+  const canIncrement =
+    cached &&
+    Array.isArray(cached.contacts) &&
+    cached.contacts.length > 0 &&
+    cached.per_form &&
+    cached.full_rebuilt_at &&
+    Date.now() - Date.parse(cached.full_rebuilt_at) < CONTACT_INDEX_FULL_REBUILD_MS;
+  if (canIncrement) {
+    try {
+      const forms = await listVideoaskForms();
+      const keys = new Set(cached.contacts.map(contactKey));
+      const perForm: NonNullable<ContactIndex["per_form"]> = { ...cached.per_form };
+      const added: ContactRow[] = [];
+      for (const form of forms) {
+        const known = perForm[form.form_id];
+        let newRows: ContactRow[];
+        if (!known) {
+          // A form we have never indexed → full fetch for just this form.
+          const rows = await fetchFormContacts(form);
+          newRows = rows.filter((r) => !keys.has(contactKey(r)));
+          perForm[form.form_id] = {
+            title: form.title,
+            count: rows.length,
+            max_c: rows.reduce((m, r) => (r.c > m ? r.c : m), ""),
+          };
+        } else {
+          newRows = await fetchFormContactsIncremental(form, known, keys);
+          known.count += newRows.length;
+          known.max_c = newRows.reduce((m, r) => (r.c > m ? r.c : m), known.max_c ?? "");
+        }
+        for (const r of newRows) {
+          keys.add(contactKey(r));
+          added.push(r);
+        }
+      }
+      const contacts = [...cached.contacts, ...added];
+      if (contacts.length === 0) throw new Error("incremental refresh produced an empty index");
+      const index: ContactIndex = {
+        updated_at: new Date().toISOString(),
+        full_rebuilt_at: cached.full_rebuilt_at,
+        total: contacts.length,
+        forms: forms.length,
+        contacts,
+        per_form: perForm,
+      };
+      await writeStateKey(CONTACT_INDEX_KEY, index);
+      return index;
+    } catch (err) {
+      console.error(
+        `[recruiting] incremental contact-index refresh failed — falling back to FULL rebuild: ${String(err).slice(0, 300)}`,
+      );
+    }
+  }
+
+  // ── Full rebuild (legacy cache, weekly resync, or incremental fallback). ──
   const forms = await listVideoaskForms();
   // Parallel across forms; pages within a form are sequential.
-  const perForm = await Promise.all(forms.map((f) => fetchFormContacts(f)));
-  const contacts = perForm.flat();
+  const perFormRows = await Promise.all(forms.map((f) => fetchFormContacts(f)));
+  const contacts = perFormRows.flat();
   if (contacts.length === 0) {
     throw new Error("VideoAsk contact-index rebuild returned 0 contacts — refusing to dedup against nothing.");
   }
+  const per_form: NonNullable<ContactIndex["per_form"]> = {};
+  forms.forEach((f, i) => {
+    per_form[f.form_id] = {
+      title: f.title,
+      count: perFormRows[i].length,
+      max_c: perFormRows[i].reduce((m, r) => (r.c > m ? r.c : m), ""),
+    };
+  });
+  const now = new Date().toISOString();
   const index: ContactIndex = {
-    updated_at: new Date().toISOString(),
+    updated_at: now,
+    full_rebuilt_at: now,
     total: contacts.length,
     forms: forms.length,
     contacts,
+    per_form,
   };
   await writeStateKey(CONTACT_INDEX_KEY, index);
   return index;

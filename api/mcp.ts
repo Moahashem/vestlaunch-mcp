@@ -902,6 +902,92 @@ async function getCfaNumbers(cfg: Cfg): Promise<unknown> {
 // Thin-agent / smart-tools (D13). Returns the Cranbrook "CF Leasing Leads" (LeadSimple)
 // lead counts for the Company Numbers "CFA Leasing -> Leads" row (B35:E35). LeadSimple has
 // NO counting API: a fetcher on the FFL VPS logs in headlessly each morning, reads the
+// --- SMART TOOLS: get_leasing_triage / act_leasing_triage ---
+// The cloud triage surface for the Cranbrook AI leasing agent (2026-08-30,
+// Mo: "I don't want it relying on my mac"). The scheduled morning triage
+// runner has no Mac, no .env.prod, and no LeadSimple MCP — these two tools
+// are how it sees who is stuck and files an OWNED task about it.
+// get_leasing_triage is READ-ONLY; act_leasing_triage can only escalate
+// (needs-a-human row + RingCentral ping + LeadSimple note, deduped per
+// conversation) or resolve — it can never message a renter.
+const LEASING_TRIAGE_TOOL_NAME = "get_leasing_triage";
+const LEASING_TRIAGE_TOOL_DESC =
+  "Cranbrook AI leasing agent triage state, read-only: the latest heartbeat (with its problems " +
+  "list), every open needs-a-human row (7d, with repeatCount so day-4 repeats are visible), every " +
+  "past tour still missing a Toured/No-show outcome, and a compact card per referenced " +
+  "conversation (stage, opt-out state, post-tour check-in state, prequal, last 3 messages, " +
+  "transcript link). Built for the scheduled morning triage runner so it needs no Mac and no " +
+  ".env.prod. Requires ffl-crm GET /api/v1/analytics/leasing-triage deployed and the Bearer key " +
+  "to have scope properties:read (or *). No arguments. Read-only.";
+const LEASING_TRIAGE_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getLeasingTriage(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/leasing-triage");
+  if (!resp.success) {
+    throw new Error(
+      `leasing-triage endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/leasing-triage (ffl-crm) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-triage" };
+}
+
+const LEASING_TRIAGE_ACT_TOOL_NAME = "act_leasing_triage";
+const LEASING_TRIAGE_ACT_TOOL_DESC =
+  "Perform one triage action on a Cranbrook leasing conversation. action='escalate' files the " +
+  "OWNED task: one deduped needs-a-human row, one RingCentral ping, and a note on the LeadSimple " +
+  "card — lead the reason with who should own it and what to do (e.g. 'OWNER: leasing team — call " +
+  "Amiyai today; opted out of SMS, phone is the only channel'). action='resolve' dissolves the " +
+  "open needs-a-human row(s) for a conversation whose work is confirmed done — never resolve to " +
+  "tidy a list. This tool can NEVER message a renter, close a conversation, or record a tour " +
+  "outcome. Requires ffl-crm POST /api/v1/analytics/leasing-triage deployed and the Bearer key to " +
+  "have scope properties:read (or *).";
+const LEASING_TRIAGE_ACT_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    action: { type: "string" as const, enum: ["escalate", "resolve"], description: "What to do." },
+    conversationId: { type: "string" as const, description: "The leasing conversation id (from get_leasing_triage)." },
+    reason: {
+      type: "string" as const,
+      description:
+        "For escalate: the owned ask — WHO should do WHAT by WHEN, plus why. For resolve: what was done and how you verified it.",
+    },
+    category: { type: "string" as const, description: "Optional short category slug (default 'triage')." },
+    urgency: { type: "string" as const, enum: ["normal", "urgent"], description: "Default normal." },
+  },
+  required: ["action", "conversationId", "reason"],
+  additionalProperties: false,
+};
+
+async function actLeasingTriage(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
+  const action = rawArgs.action;
+  const conversationId = rawArgs.conversationId;
+  const reason = rawArgs.reason;
+  if (action !== "escalate" && action !== "resolve") throw new Error('action must be "escalate" or "resolve".');
+  if (typeof conversationId !== "string" || !conversationId.trim()) throw new Error("conversationId is required.");
+  if (typeof reason !== "string" || !reason.trim()) throw new Error("reason is required.");
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "POST", "/api/v1/analytics/leasing-triage", undefined, {
+    action,
+    conversationId,
+    reason,
+    category: typeof rawArgs.category === "string" ? rawArgs.category : undefined,
+    urgency: rawArgs.urgency === "urgent" ? "urgent" : "normal",
+  });
+  if (!resp.success) {
+    throw new Error(
+      `leasing-triage POST failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires POST /api/v1/analytics/leasing-triage (ffl-crm) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-triage" };
+}
+
 // server-computed Count per window, and pushes the numbers to ffl-crm; this reads
 // /api/v1/analytics/cf-lead-numbers - no fallback. READ-ONLY.
 const CF_LEADS_TOOL_NAME = "get_cf_lead_numbers";
@@ -1100,6 +1186,8 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
+  const includeLeasingTriageTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_TOOL_NAME);
+  const includeLeasingTriageActTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_ACT_TOOL_NAME);
   const includeCfLeadsTool = !toolFilter || toolFilter.has(CF_LEADS_TOOL_NAME);
   const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
@@ -1152,6 +1240,12 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
   ...(includeCfaTool
         ? [{ name: CFA_TOOL_NAME, description: CFA_TOOL_DESC, inputSchema: CFA_TOOL_SCHEMA }]
+        : []),
+      ...(includeLeasingTriageTool
+        ? [{ name: LEASING_TRIAGE_TOOL_NAME, description: LEASING_TRIAGE_TOOL_DESC, inputSchema: LEASING_TRIAGE_TOOL_SCHEMA }]
+        : []),
+      ...(includeLeasingTriageActTool
+        ? [{ name: LEASING_TRIAGE_ACT_TOOL_NAME, description: LEASING_TRIAGE_ACT_TOOL_DESC, inputSchema: LEASING_TRIAGE_ACT_TOOL_SCHEMA }]
         : []),
       ...(includeCfLeadsTool
         ? [{ name: CF_LEADS_TOOL_NAME, description: CF_LEADS_TOOL_DESC, inputSchema: CF_LEADS_TOOL_SCHEMA }]
@@ -1338,6 +1432,40 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_SALES_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === LEASING_TRIAGE_TOOL_NAME) {
+      if (!includeLeasingTriageTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getLeasingTriage(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${LEASING_TRIAGE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === LEASING_TRIAGE_ACT_TOOL_NAME) {
+      if (!includeLeasingTriageActTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await actLeasingTriage(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${LEASING_TRIAGE_ACT_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

@@ -51,14 +51,18 @@ const AGENT_KEY = "sales-lead-count";
 
 const DEFAULT_PROMPT = [
   "Run your FULL daily Sales update for today (America/Chicago) — every item",
-  "your status cell A54 does not already mark done for TODAY: the day's tab",
+  "your status cell A108 does not already mark done for TODAY: the day's tab",
   "(create it if missing — you are the tab steward), Leads row 26, Calls row",
   "27, Sign Ups row 29, and the huddle notes H46/H47 (verbatim block + your",
-  "RADAR analysis). Follow your system prompt exactly: read A54 first, skip",
-  "done items, work through ALL remaining items even if one fails, update A54",
+  "RADAR analysis). Follow your system prompt exactly: read A108 first, skip",
+  "done items, work through ALL remaining items even if one fails, update A108",
   "after each, clear-on-error, never row 28. This fire may be a RETRY — that",
-  "is normal; A54 makes it idempotent. Read back what you wrote and report",
+  "is normal; A108 makes it idempotent. Read back what you wrote and report",
   "which items were filled, skipped (already done), or failed.",
+  "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
+  "or verified already done), call report_run_complete with agent_key 'sales-lead-count' and a one-line",
+  "detail: it stands down today's remaining retry crons. Best-effort: if that tool is missing",
+  "or errors, say so in your report and finish — one attempt only, never let it block you.",
 ].join(" ");
 
 /**
@@ -130,7 +134,7 @@ export default async function handler(
   // redundant -- skip it instead of waking (and paying for) another full agent
   // session. Fail-open: any doubt and we run exactly as before. See
   // workforce-hub.ts for semantics.
-  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
+  if (await shouldSkipRedundantKickoff(AGENT_KEY, { healWindowStartUtcMinutes: 12 * 60 + 15 })) {
     json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
     return;
   }

@@ -68,17 +68,22 @@ const DEFAULT_PROMPT = [
   "re-sort anything yourself; the roster arrives finished and pre-sorted worst-first.",
   "Confirm today's tab (M.D.2026, no zero padding) ALREADY EXISTS in the Company",
   "Numbers sheet; do NOT create it — if it is missing, STOP and report. Read your",
-  "status cell A93 FIRST: if it already shows roster=done for today, stop (nothing",
-  "to do). Otherwise write A61 (the title line with in_flight and stalled_count),",
-  "the row 62 headers, one row per roster entry across A63:K90 in the order given,",
-  "and A91 (the overflow line, or blank when 28 rows or fewer). BLANK any unused",
-  "rows through row 90 — today's tab is a copy of yesterday's, so stale owners",
+  "status cell A120 FIRST: if it already shows roster=done for today, report it",
+  "complete (see FINAL STEP) and stop. Otherwise write A49 (the title line with",
+  "in_flight and stalled_count),",
+  "the row 50 headers, one row per roster entry across A51:K78 in the order given,",
+  "and A79 (the overflow line, or blank when 28 rows or fewer). BLANK any unused",
+  "rows through row 78 — today's tab is a copy of yesterday's, so stale owners",
   "would otherwise linger. HONOR THE SOURCE GATES: if sources.showmojo_ok is false",
   "leave column H alone entirely, and if sources.rent_roll_ok is false leave column",
   "J alone — a blank there would read as 'nothing is listed / nothing is rented',",
-  "which is worse than no answer. Then set A93 to roster=done, read the block back,",
-  "and report what you wrote. If the tool fails, write nothing, leave A93 not-done",
+  "which is worse than no answer. Then set A120 to roster=done, read the block back,",
+  "and report what you wrote. If the tool fails, write nothing, leave A120 not-done",
   "for the next retry, and report the failure clearly.",
+  "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
+  "or verified already done), call report_run_complete with agent_key 'onboarding' and a one-line",
+  "detail: it stands down today's remaining retry crons. Best-effort: if that tool is missing",
+  "or errors, say so in your report and finish — one attempt only, never let it block you.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -103,7 +108,7 @@ export default async function handler(
   // redundant -- skip it instead of waking (and paying for) another full agent
   // session. Fail-open: any doubt and we run exactly as before. See
   // workforce-hub.ts for semantics.
-  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
+  if (await shouldSkipRedundantKickoff(AGENT_KEY, { healWindowStartUtcMinutes: 12 * 60 + 45 })) {
     json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
     return;
   }

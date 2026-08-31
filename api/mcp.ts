@@ -77,6 +77,7 @@ import {
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import { readAccessToken } from "./_oauth";
+import { reportWorkComplete, WORK_COMPLETE_PREFIX } from "./workforce-hub";
 import {
   APPFOLIO_ENTRY_TOOLS,
   APPFOLIO_ENTRY_TOOL_NAMES,
@@ -619,18 +620,26 @@ const FFL_REN_TOOL_NAME = "get_ffl_renewals";
 const FFL_REN_TOOL_DESC =
   "Smart server-side aggregation: returns FFL lease-renewal metrics for Company Numbers " +
   "row 9 (B9-F9), dummy accounts EXCLUDED (/zdummy/i + 1201 Fannin). Computed from AppFolio " +
-  "rent_roll + lease_expiration_detail + lease_history. Returns { this_month_expiring (B9), " +
-  "this_month_expiring_detail, pending_signature (C9), signed_renewals_this_month (D9), " +
-  "eligible_label (E9, e.g. 'Jun(2) - Jul(1) - Aug(8)'), eligible_buckets, renewal_pct_90d (F9), " +
-  "renewal_pct_components, window, excluded_properties, as_of, source }. today = America/Chicago, " +
-  "+90 strict. Source = /api/v1/analytics/ffl-renewals. No arguments. Read-only.";
+  "rent_roll + lease_expiration_detail + lease_history. LEAN by default — returns exactly what " +
+  "the sheet needs: { this_month_expiring (B9), this_month_expiring_detail (for H28/H29), " +
+  "pending_signature (C9), signed_renewals_this_month (D9), eligible_label (E9, e.g. " +
+  "'Jun(2) - Jul(1) - Aug(8)'), renewal_pct_90d (F9; null => leave F9 BLANK, never guess), " +
+  "f9_sheet_error, window, cells, as_of, source }. Pass verbose=true ONLY when a human is " +
+  "debugging — it adds the full component/diagnostic breakdown (large). today = America/Chicago, " +
+  "+90 strict. Source = /api/v1/analytics/ffl-renewals. Read-only.";
 const FFL_REN_TOOL_SCHEMA = {
   type: "object" as const,
-  properties: {},
+  properties: {
+    verbose: {
+      type: "boolean" as const,
+      description:
+        "Default false (lean: cell values + gates only). true = full diagnostic payload (large; for human debugging, not daily runs).",
+    },
+  },
   additionalProperties: false,
 };
 
-async function getFflRenewals(cfg: Cfg): Promise<unknown> {
+async function getFflRenewals(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
   const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-renewals");
   if (!resp.success) {
     throw new Error(
@@ -643,7 +652,32 @@ async function getFflRenewals(cfg: Cfg): Promise<unknown> {
   if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).this_month_expiring !== "number") {
     throw new Error("ffl-renewals endpoint returned an unexpected shape (no numeric this_month_expiring).");
   }
-  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-renewals" };
+  const full = d as Record<string, unknown>;
+  if (rawArgs.verbose === true) {
+    return { ...full, source: "native:/api/v1/analytics/ffl-renewals" };
+  }
+  // LEAN projection (2026-08-31): the full payload (renewal_pct_components,
+  // eligible_buckets, definition, excluded_properties, ...) grows through the
+  // month and was implicated in the 8/30-8/31 morning sessions dying before
+  // rows 9/14 were written. The agent needs cell values + gate signals only.
+  const components = (full.renewal_pct_components ?? {}) as Record<string, unknown>;
+  return {
+    this_month_expiring: full.this_month_expiring,
+    this_month_expiring_detail: full.this_month_expiring_detail,
+    month_to_month_count: full.month_to_month_count,
+    pending_signature: full.pending_signature,
+    signed_renewals_this_month: full.signed_renewals_this_month,
+    eligible_total: full.eligible_total,
+    eligible_label: full.eligible_label,
+    renewal_pct_90d: full.renewal_pct_90d,
+    f9_sheet_error: components.sheet_error ?? null,
+    f9_rule: "renewal_pct_90d null => leave F9 BLANK, never guess",
+    window: full.window,
+    cells: full.cells,
+    as_of: full.as_of,
+    verbose_hint: "pass verbose=true for the full component/diagnostic breakdown",
+    source: "native:/api/v1/analytics/ffl-renewals",
+  };
 }
 
 // --- SMART TOOL: get_ffl_delinquency ---
@@ -656,20 +690,27 @@ const FFL_DEL_TOOL_NAME = "get_ffl_delinquency";
 const FFL_DEL_TOOL_DESC =
   "Smart server-side aggregation: returns FFL delinquency metrics for Company Numbers " +
   "row 14 (B14-F14), dummy accounts EXCLUDED (/zdummy/i + 1201 Fannin). Computed from AppFolio " +
-  "delinquency + charge_detail + rent_roll. Returns { delinquency_pct (B14, LIVE 'today'), " +
-  "start_of_week_pct (C14), balances_over_500 (D14), evictions_filed (E14), last_month_pct (F14, " +
-  "null until a month-end is observed => skip the cell), delinquency_components, " +
-  "charge_detail_diagnostics, evictions_detail, delinquency_history, window, excluded_properties, " +
-  "as_of, source }. B14 = gross aging-bucket balance / sum(charge_detail Occupancy charges " +
-  "this month); it is date-sensitive (high right after the 1st, falls as auto-pay clears). today = " +
-  "America/Chicago. Source = /api/v1/analytics/ffl-delinquency. No arguments. Read-only.";
+  "delinquency + charge_detail + rent_roll. LEAN by default — returns exactly what the sheet " +
+  "needs: { delinquency_pct (B14, LIVE 'today'), start_of_week_pct (C14), balances_over_500 " +
+  "(D14), evictions_filed (E14), last_month_pct (F14; null => leave F14 BLANK), evictions_detail, " +
+  "evict_coverage_status, window, cells, as_of, source }. Pass verbose=true ONLY when a human is " +
+  "debugging — it adds the full charge/bucket diagnostics (VERY large at month end). B14 = gross " +
+  "aging-bucket balance / sum(charge_detail Occupancy charges this month); it is date-sensitive " +
+  "(high right after the 1st, falls as auto-pay clears). today = America/Chicago. " +
+  "Source = /api/v1/analytics/ffl-delinquency. Read-only.";
 const FFL_DEL_TOOL_SCHEMA = {
   type: "object" as const,
-  properties: {},
+  properties: {
+    verbose: {
+      type: "boolean" as const,
+      description:
+        "Default false (lean: cell values + gates only). true = full diagnostic payload (very large at month end; for human debugging, not daily runs).",
+    },
+  },
   additionalProperties: false,
 };
 
-async function getFflDelinquency(cfg: Cfg): Promise<unknown> {
+async function getFflDelinquency(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
   const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/ffl-delinquency");
   if (!resp.success) {
     throw new Error(
@@ -682,7 +723,90 @@ async function getFflDelinquency(cfg: Cfg): Promise<unknown> {
   if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).delinquency_pct !== "number") {
     throw new Error("ffl-delinquency endpoint returned an unexpected shape (no numeric delinquency_pct).");
   }
-  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-delinquency" };
+  const full = d as Record<string, unknown>;
+  if (rawArgs.verbose === true) {
+    return { ...full, source: "native:/api/v1/analytics/ffl-delinquency" };
+  }
+  // LEAN projection (2026-08-31): the full payload (month_billed_by_charge with
+  // one line per distinct charge description, charge_detail_diagnostics,
+  // delinquency_bucket_diagnostics, ...) grows through the month — ~18KB by the
+  // 31st — and was implicated in the 8/30-8/31 morning sessions dying before
+  // rows 9/14 were written. The agent needs cell values + gate signals only.
+  const coverage = (full.evict_coverage ?? {}) as Record<string, unknown>;
+  return {
+    delinquency_pct: full.delinquency_pct,
+    start_of_week_pct: full.start_of_week_pct,
+    balances_over_500: full.balances_over_500,
+    evictions_filed: full.evictions_filed,
+    last_month_pct: full.last_month_pct,
+    f14_rule: "last_month_pct null => leave F14 BLANK, never guess",
+    evictions_detail: full.evictions_detail,
+    evict_coverage_status: coverage.status ?? null,
+    window: full.window,
+    cells: full.cells,
+    as_of: full.as_of,
+    verbose_hint: "pass verbose=true for the full charge/bucket diagnostic breakdown",
+    source: "native:/api/v1/analytics/ffl-delinquency",
+  };
+}
+
+// --- SMART TOOL: report_run_complete ---
+// Completion marker for the daily-cron spend guard (workforce-hub.ts v2,
+// 2026-08-31). A daily Managed Agent calls this ONCE, as its LAST action, after
+// EVERY item in its daily scope is done for today (filled now, or verified
+// already done). It writes a "WORK COMPLETE" run-status row to the hub; the
+// retry cron slots read that row and stand down. Without it the final (heal-
+// window) slots always wake — costing a short session, never correctness.
+// Requires agent:write (or *) on the caller's key; the row itself is written
+// with the server's own hub key.
+const RUN_COMPLETE_TOOL_NAME = "report_run_complete";
+const RUN_COMPLETE_TOOL_DESC =
+  "Mark your DAILY SCOPE COMPLETE for today (America/Chicago) so the retry cron slots stand " +
+  "down. Call ONCE, as your LAST action, ONLY when every item in your scope is done for today " +
+  "(written now, or verified already done) — NEVER when any item is missing, blanked, or gated. " +
+  `Writes a '${WORK_COMPLETE_PREFIX}' run-status row to the workforce hub. Best-effort: if this ` +
+  "tool errors, report the error and finish — do not retry more than once and never let it " +
+  "block your run. Requires agent:write (or *) scope.";
+const RUN_COMPLETE_AGENT_KEYS = [
+  "occupancy",
+  "sales-lead-count",
+  "showmojo",
+  "cranbrook-cfa",
+  "cranbrook-cf-leads",
+  "onboarding",
+] as const;
+const RUN_COMPLETE_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    agent_key: {
+      type: "string" as const,
+      enum: [...RUN_COMPLETE_AGENT_KEYS],
+      description: "Your own workforce agentKey (matches the cron's run-status rows).",
+    },
+    detail: {
+      type: "string" as const,
+      description: "One line: which items were filled vs already done (max 300 chars).",
+    },
+  },
+  required: ["agent_key"],
+  additionalProperties: false,
+};
+
+async function reportRunComplete(rawArgs: Record<string, unknown>): Promise<unknown> {
+  const agentKey = typeof rawArgs.agent_key === "string" ? rawArgs.agent_key : "";
+  if (!(RUN_COMPLETE_AGENT_KEYS as readonly string[]).includes(agentKey)) {
+    throw new Error(
+      `agent_key must be one of: ${RUN_COMPLETE_AGENT_KEYS.join(", ")} (got '${agentKey}').`,
+    );
+  }
+  const detail = typeof rawArgs.detail === "string" ? rawArgs.detail : undefined;
+  await reportWorkComplete(agentKey, detail);
+  return {
+    ok: true,
+    agent_key: agentKey,
+    marker: WORK_COMPLETE_PREFIX,
+    note: "Retry cron slots for this agent will stand down for the rest of today.",
+  };
 }
 
 // --- SMART TOOL: get_ffl_homes ---
@@ -1192,6 +1316,10 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
   const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
+  // report_run_complete writes to the hub via the server's own key, so it is
+  // exposed only to callers whose OWN key carries agent:write (or *).
+  const includeRunCompleteTool =
+    hasScope("agent:write", scopes) && (!toolFilter || toolFilter.has(RUN_COMPLETE_TOOL_NAME));
 
   // AppFolio entry-agent smart tools (Phase 3, owner onboarding). They proxy
   // a PRIVILEGED token (never the caller's key), so exposure requires BOTH:
@@ -1259,6 +1387,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       ...(includeHudAfTool
         ? [{ name: FFL_HUDAF_TOOL_NAME, description: FFL_HUDAF_TOOL_DESC, inputSchema: FFL_HUDAF_TOOL_SCHEMA }]
         : []),
+      ...(includeRunCompleteTool
+        ? [{ name: RUN_COMPLETE_TOOL_NAME, description: RUN_COMPLETE_TOOL_DESC, inputSchema: RUN_COMPLETE_TOOL_SCHEMA }]
+        : []),
       ...appfolioTools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
     ],
   }));
@@ -1280,6 +1411,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       } catch (err) {
         return {
           content: [{ type: "text", text: `Error invoking ${name}: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === RUN_COMPLETE_TOOL_NAME) {
+      if (!includeRunCompleteTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await reportRunComplete((rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${RUN_COMPLETE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
           isError: true,
         };
       }
@@ -1341,7 +1489,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
       }
       try {
-        const result = await getFflRenewals(cfg);
+        const result = await getFflRenewals(cfg, (rawArgs ?? {}) as Record<string, unknown>);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return {
@@ -1358,7 +1506,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
       }
       try {
-        const result = await getFflDelinquency(cfg);
+        const result = await getFflDelinquency(cfg, (rawArgs ?? {}) as Record<string, unknown>);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return {

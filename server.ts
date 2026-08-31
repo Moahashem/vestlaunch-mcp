@@ -16,6 +16,7 @@
  *   - GET/POST /api/cron/appfolio-entry        → queue-aware hourly AppFolio entry-agent kickoff
  *   - POST/GET /api/recruiting-mcp             → recruiting cloud-half smart tools (Bearer-protected)
  *   - GET/POST /api/cron/recruiting-sweep      → the daily recruiting sweep (cloud half) trigger
+ *   - GET/POST /api/cron/fleet-staleness       → 13:10 UTC fleet staleness guard (reads the hub, pings RingCentral)
  *   - GET/POST /api/cron/caller-name-fill      → fills missing caller names on phone-only leads (AppFolio guest cards / LeadSimple)
  *   - POST /api/hooks/leadsimple-listing       → §5.6 owner-intake listing trigger → LeadSimple 03 Leasing Process
  *
@@ -47,6 +48,7 @@ import boomScreeningsCronHandler from "./api/cron/daily-boom-screenings";
 import appfolioEntryCronHandler from "./api/cron/appfolio-entry";
 import callerNameFillCronHandler from "./api/cron/caller-name-fill";
 import recruitingSweepCronHandler from "./api/cron/recruiting-sweep";
+import fleetStalenessCronHandler from "./api/cron/fleet-staleness";
 import recruitingMcpHandler from "./api/recruiting-mcp";
 import leadsimpleListingHookHandler from "./api/hooks/leadsimple-listing";
 
@@ -121,6 +123,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       await recruitingSweepCronHandler(req, res);
       return;
     }
+    if (path === "/api/cron/fleet-staleness") {
+      await fleetStalenessCronHandler(req, res);
+      return;
+    }
     if (path === "/api/hooks/leadsimple-listing") {
       await leadsimpleListingHookHandler(req, res);
       return;
@@ -183,6 +189,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/cron/appfolio-entry",
             "/api/cron/caller-name-fill",
             "/api/cron/recruiting-sweep",
+            "/api/cron/fleet-staleness",
             "/api/hooks/leadsimple-listing",
             "/.well-known/oauth-protected-resource",
             "/.well-known/oauth-authorization-server",

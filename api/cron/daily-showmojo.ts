@@ -27,7 +27,7 @@
  * the AppFolio agent runs 6:10 AM CT (+retries); this ShowMojo cron is staggered
  * to fire at 6:20 AM CT (+20-min retries to 8:00 AM) so the tab already exists.
  * If the tab is missing the agent STOPs and reports (it never creates). The
- * agent is idempotent (its A51 status cell): a homes write already done today is
+ * agent is idempotent (its A104 status cell): a homes write already done today is
  * skipped, so the later retries only re-attempt a homes row that errored.
  *
  * The session is created WITHOUT pinning a version, so it always runs the agent's
@@ -66,16 +66,20 @@ const DEFAULT_PROMPT = [
   "Call your get_ffl_homes tool ONCE (no arguments) — do NOT compute anything",
   "yourself. Confirm today's tab (M.D.2026) ALREADY EXISTS in the Company Numbers",
   "sheet; do NOT create it — if it is missing, STOP and report so it can be created",
-  "first. If your status cell A51 already shows homes=done for today, stop (nothing",
-  "to do). Otherwise apply your plausibility gate: showmojo_diagnostics.ok MUST be",
+  "first. If your status cell A104 already shows homes=done for today, report it complete",
+  "(see FINAL STEP) and stop. Otherwise apply your plausibility gate: showmojo_diagnostics.ok MUST be",
   "true and auth_style must not be null — if it is not, do NOT write anything and",
   "report the ShowMojo auth failure. When the gate passes, write Homes row 20 in one",
   "batch: A20=homes_listed, B20=listed_rent_total (write A20:B20), then D20=homes_to_list,",
   "E20=fmr_potential (write D20:E20) — NEVER write C20. Then write the Property-Detail",
   "block A40/A41/A43/A44 (labels + the on_market_block / to_list_block strings verbatim).",
-  "Set A51 to homes=done, then read A20/B20/D20/E20 + A40/A41/A43/A44 back and report",
+  "Set A104 to homes=done, then read A20/B20/D20/E20 + A40/A41/A43/A44 back and report",
   "exactly what you wrote. If get_ffl_homes fails or the gate fails, DO NOT write or",
   "guess — leave the cells for the next retry and clearly report the failure.",
+  "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
+  "or verified already done), call report_run_complete with agent_key 'showmojo' and a one-line",
+  "detail: it stands down today's remaining retry crons. Best-effort: if that tool is missing",
+  "or errors, say so in your report and finish — one attempt only, never let it block you.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -100,7 +104,7 @@ export default async function handler(
   // redundant -- skip it instead of waking (and paying for) another full agent
   // session. Fail-open: any doubt and we run exactly as before. See
   // workforce-hub.ts for semantics.
-  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
+  if (await shouldSkipRedundantKickoff(AGENT_KEY, { healWindowStartUtcMinutes: 12 * 60 + 35 })) {
     json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
     return;
   }

@@ -17,7 +17,7 @@
  * The agent's own stale-gate refuses to write if the fetcher data isn't from today.
  *
  * WRITER-ONLY: the agent never creates the tab; if missing it stops and reports.
- * Idempotent via status cell A58 — retry fires are harmless.
+ * Idempotent via status cell A116 — retry fires are harmless.
  *
  * Schedule: see vercel.json (11:40/12:00/12:20 UTC = 6:40/7:00/7:20 AM CT in CDT).
  *
@@ -53,11 +53,15 @@ const DEFAULT_PROMPT = [
   "Run your daily CF Leasing lead count for today (America/Chicago).",
   "Call your get_cf_lead_numbers tool ONCE (no arguments) — do NOT compute anything yourself.",
   "Confirm today's tab (M.D.2026) ALREADY EXISTS in the Company Numbers sheet; do NOT",
-  "create it — if it is missing, STOP and report. Check your status cell A58 first and",
-  "stop if today is already done. Apply the gate: if stale=true write NOTHING and",
-  "alert in A59. Otherwise write ONLY these cells: this_week→B35, this_month→C35,",
-  "last_month→D35, new_30d→E35 — never any other cell — then stamp status A58. Read",
+  "create it — if it is missing, STOP and report. Check your status cell A116 first; if",
+  "today is already done, report it complete (see FINAL STEP) and stop. Apply the gate: if stale=true write NOTHING and",
+  "alert in A117. Otherwise write ONLY these cells: this_week→B35, this_month→C35,",
+  "last_month→D35, new_30d→E35 — never any other cell — then stamp status A116. Read",
   "back B35:E35 and report exactly what was written and skipped.",
+  "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
+  "or verified already done), call report_run_complete with agent_key 'cranbrook-cf-leads' and a one-line",
+  "detail: it stands down today's remaining retry crons. Best-effort: if that tool is missing",
+  "or errors, say so in your report and finish — one attempt only, never let it block you.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -81,7 +85,7 @@ export default async function handler(
   // redundant -- skip it instead of waking (and paying for) another full agent
   // session. Fail-open: any doubt and we run exactly as before. See
   // workforce-hub.ts for semantics.
-  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
+  if (await shouldSkipRedundantKickoff(AGENT_KEY, { healWindowStartUtcMinutes: 12 * 60 + 15 })) {
     json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
     return;
   }

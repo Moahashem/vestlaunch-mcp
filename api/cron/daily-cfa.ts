@@ -17,7 +17,7 @@
  * stale-gate refuses to write if the fetcher data isn't from today.
  *
  * WRITER-ONLY: the agent never creates the tab; if missing it stops and reports.
- * Idempotent via status cell A55 — retry fires are harmless.
+ * Idempotent via status cell A112 — retry fires are harmless.
  *
  * Schedule: see vercel.json (11:30/11:50/12:10 UTC = 6:30/6:50/7:10 AM CT in CDT).
  *
@@ -53,11 +53,15 @@ const DEFAULT_PROMPT = [
   "Run your daily CFA update for today (America/Chicago).",
   "Call your get_cfa_numbers tool ONCE (no arguments) — do NOT compute anything yourself.",
   "Confirm today's tab (M.D.2026) ALREADY EXISTS in the Company Numbers sheet; do NOT",
-  "create it — if it is missing, STOP and report. Check your status cell A55 first and",
-  "stop if today is already done. Apply every gate: if stale=true write NOTHING and",
+  "create it — if it is missing, STOP and report. Check your status cell A112 first; if",
+  "today is already done, report it complete (see FINAL STEP) and stop. Apply every gate: if stale=true write NOTHING and",
   "alert; skip null cells. Then write your cells per your write recipe (B5/F5/G5/H5,",
-  "B10:F10, B15 and D15 — never C15/E15/F15) plus status A55. Read back everything you",
+  "B10:F10, B15 and D15 — never C15/E15/F15) plus status A112. Read back everything you",
   "wrote and report exactly what was written and skipped.",
+  "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
+  "or verified already done), call report_run_complete with agent_key 'cranbrook-cfa' and a one-line",
+  "detail: it stands down today's remaining retry crons. Best-effort: if that tool is missing",
+  "or errors, say so in your report and finish — one attempt only, never let it block you.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -81,7 +85,7 @@ export default async function handler(
   // redundant -- skip it instead of waking (and paying for) another full agent
   // session. Fail-open: any doubt and we run exactly as before. See
   // workforce-hub.ts for semantics.
-  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
+  if (await shouldSkipRedundantKickoff(AGENT_KEY, { healWindowStartUtcMinutes: 12 * 60 + 5 })) {
     json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
     return;
   }

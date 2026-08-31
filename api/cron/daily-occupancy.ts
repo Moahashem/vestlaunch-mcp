@@ -52,12 +52,16 @@ const AGENT_KEY = "occupancy";
 
 const DEFAULT_PROMPT = [
   "Run your full daily FFL update for today (America/Chicago) — ALL FIVE items",
-  "still missing per your A50 status: occupancy (row 4), renewals (row 9 + H28/H29),",
+  "still missing per your A100 status: occupancy (row 4), renewals (row 9 + H28/H29),",
   "delinquency (row 14), apps & leases (row 23), and the huddle notes (H40/H41).",
   "Confirm today's tab (M.D.2026) ALREADY EXISTS; do NOT create it — if missing,",
   "STOP and report. Follow your system prompt exactly: gates, clear-on-error,",
-  "verbatim notes block, A50 flags. Read back what you wrote and report which items",
+  "verbatim notes block, A100 flags. Read back what you wrote and report which items",
   "were filled, skipped (already done), or failed.",
+  "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
+  "or verified already done), call report_run_complete with agent_key 'occupancy' and a one-line",
+  "detail: it stands down today's remaining retry crons. Best-effort: if that tool is missing",
+  "or errors, say so in your report and finish — one attempt only, never let it block you.",
 ].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -82,7 +86,7 @@ export default async function handler(
   // redundant -- skip it instead of waking (and paying for) another full agent
   // session. Fail-open: any doubt and we run exactly as before. See
   // workforce-hub.ts for semantics.
-  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
+  if (await shouldSkipRedundantKickoff(AGENT_KEY, { healWindowStartUtcMinutes: 12 * 60 + 45 })) {
     json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
     return;
   }

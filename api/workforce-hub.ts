@@ -98,7 +98,7 @@ export async function logAgentRun(report: AgentRunReport): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Spend guard — skip redundant retry kickoffs
+// Spend guard — skip redundant retry kickoffs (v2: completion-aware)
 // ---------------------------------------------------------------------------
 //
 // Most daily crons have several schedule slots (see vercel.json): the first is
@@ -106,17 +106,57 @@ export async function logAgentRun(report: AgentRunReport): Promise<void> {
 // Managed Agent session even when the day's work was already done — the agent
 // woke, read the sheet, said "already done", and billed us anyway.
 //
-// IMPORTANT SEMANTICS: a cron's own "ok" row means the KICKOFF succeeded, not
-// that the agent finished its work (agents don't self-report completion yet).
-// So we deliberately allow TWO successful kickoffs per day — the real run plus
-// ONE verification wake that re-reads the sheet and fills any gaps — and only
-// skip the slots after that. This keeps the mid-run-crash safety net while
-// cutting the redundant wakes.
+// v1 of this guard (PR #78) counted successful KICKOFFS and skipped after two.
+// That conflated "the session started" with "the work got done": on 8/30 and
+// 8/31/2026 both morning occupancy sessions ended with renewals/delinquency
+// still at "-", and the guard then suppressed all five retry slots — including
+// the late slots that write the alert cells. The sheet stayed silently blank
+// (see project doc appfolio-agent-row-skips-2026-08-31).
+//
+// v2 semantics — the completion marker is the ONLY thing that fully stands
+// down the retry ladder:
+//   1. If a "WORK COMPLETE" run-status row exists for this agentKey today
+//      (America/Chicago), every remaining slot skips. Agents write that row
+//      via the report_run_complete MCP tool as their LAST daily action.
+//   2. With NO completion marker, slots inside the HEAL WINDOW (the final
+//      schedule slots, compared in UTC because vercel.json crons are UTC)
+//      ALWAYS run — they are the retry + alert pass that catches a morning
+//      session that died or gave up on a row.
+//   3. Before the heal window, the old rule stands: skip after 2 successful
+//      kickoffs (the real run + one verification wake).
 //
 // Fail-open by design: if the hub can't be read (missing key, missing
 // agent:read scope, network), we return false and the kickoff proceeds exactly
 // as before this guard existed. A guard must never be the reason a worker
 // didn't run.
+
+/** Summary prefix that marks an agent's daily scope as fully done. */
+export const WORK_COMPLETE_PREFIX = "WORK COMPLETE";
+
+/** Today's date in America/Chicago as YYYY-MM-DD. */
+function chicagoDateString(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+/**
+ * Write the completion marker for an agent's daily scope. Called by the
+ * report_run_complete MCP tool once EVERY item in the agent's scope is done
+ * for today (filled now, or verified already done). Best-effort like all hub
+ * reporting — never throws.
+ */
+export async function reportWorkComplete(agentKey: string, detail?: string): Promise<void> {
+  const trimmed = (detail ?? "").trim().slice(0, 300);
+  await logAgentRun({
+    agentKey,
+    status: "ok",
+    summary: `${WORK_COMPLETE_PREFIX} ${chicagoDateString()}${trimmed ? `: ${trimmed}` : ""}`,
+  });
+}
 
 /** ISO timestamp for the most recent midnight in America/Chicago. */
 function startOfTodayChicagoISO(): string {
@@ -134,12 +174,27 @@ function startOfTodayChicagoISO(): string {
   return new Date(now.getTime() - secondsSinceMidnight * 1000).toISOString();
 }
 
+export interface SpendGuardOptions {
+  /**
+   * Start of this cron's heal window as minutes-since-midnight UTC (UTC because
+   * the vercel.json schedules are UTC-fixed). Slots firing at/after this time
+   * NEVER skip unless the day's work is confirmed complete. Set it just before
+   * the cron's final schedule slot(s). Default 12*60+45 (12:45 UTC) protects the
+   * 12:50/13:00 slots of the occupancy/showmojo ladders.
+   */
+  healWindowStartUtcMinutes?: number;
+}
+
 /**
- * True when this agentKey already has 2+ successful kickoffs today (America/
- * Chicago) — meaning the real run AND its verification wake both happened, so
- * any further retry slot is redundant. False (fail-open) on any read problem.
+ * True when this slot's kickoff is redundant:
+ *   - the agent already reported WORK COMPLETE today, or
+ *   - we are before the heal window and 2+ kickoffs already succeeded today.
+ * False (fail-open) on any read problem.
  */
-export async function shouldSkipRedundantKickoff(agentKey: string): Promise<boolean> {
+export async function shouldSkipRedundantKickoff(
+  agentKey: string,
+  opts?: SpendGuardOptions,
+): Promise<boolean> {
   const apiKey = hubApiKey();
   if (!apiKey) return false;
 
@@ -148,15 +203,30 @@ export async function shouldSkipRedundantKickoff(agentKey: string): Promise<bool
   try {
     const url =
       `${hubBaseUrl()}/api/v1/agent/run-status?agentKey=${encodeURIComponent(agentKey)}` +
-      `&status=ok&since=${encodeURIComponent(startOfTodayChicagoISO())}&limit=10`;
+      `&status=ok&since=${encodeURIComponent(startOfTodayChicagoISO())}&limit=20`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: controller.signal,
     });
     if (!res.ok) return false; // 403 (no agent:read) or anything else → fail open
-    const body = (await res.json()) as { data?: unknown[] };
-    const okRuns = Array.isArray(body?.data) ? body.data.length : 0;
-    return okRuns >= 2;
+    const body = (await res.json()) as { data?: Array<{ summary?: unknown }> };
+    const rows = Array.isArray(body?.data) ? body.data : [];
+
+    // 1. Confirmed complete → every remaining slot is redundant.
+    const workComplete = rows.some(
+      (r) => typeof r?.summary === "string" && r.summary.startsWith(WORK_COMPLETE_PREFIX),
+    );
+    if (workComplete) return true;
+
+    // 2. Not confirmed complete: the heal window (final slots) always runs —
+    //    it is the retry + alert pass for a morning session that died mid-run.
+    const now = new Date();
+    const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const healStart = opts?.healWindowStartUtcMinutes ?? 12 * 60 + 45;
+    if (utcMinutes >= healStart) return false;
+
+    // 3. Early slots: real run + one verification wake, then skip.
+    return rows.length >= 2;
   } catch {
     return false; // fail open — never block a run because the guard errored
   } finally {

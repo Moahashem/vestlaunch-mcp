@@ -138,7 +138,7 @@ const ROLE_LINKS: Record<string, RoleDef> = {
 };
 
 /** Loose aliases → canonical role key. */
-function normalizeRole(raw: string): string | null {
+export function normalizeRole(raw: string): string | null {
   const s = raw.toLowerCase().replace(/[^a-z]+/g, " ").trim();
   // ── Mo's REMOTE rule (2026-08-18 PM, prepping for reposted jobs with new
   //    titles): any title containing remote/virtual/work-from-home maps to the
@@ -974,6 +974,52 @@ export interface TrueAnalysisHit {
   message_id: string;
 }
 
+export interface IndeedCandidateReply {
+  name: string;
+  role: string;
+  /** conversation-…@indeedemail.com relay the reply came from (NOT an invite target). */
+  relay_email: string;
+  /** First ~200 chars of what the candidate wrote, boilerplate stripped. */
+  snippet: string;
+  received_at: string;
+  message_id: string;
+  subject: string;
+}
+
+/**
+ * "New Message from <Name> - <Job title>" → structured reply. Pure; exported for tests.
+ * Indeed pads snippets with U+034F/U+00AD filler runs — stripped here.
+ */
+export function parseIndeedReply(m: {
+  from: string;
+  subject: string;
+  snippet: string;
+  bodyText?: string;
+  receivedAt: string;
+  id: string;
+}): IndeedCandidateReply {
+  const sm = m.subject.match(/^\s*New Message from\s+(.+?)\s+-\s+(.+?)\s*$/i);
+  const name = (sm?.[1] ?? m.subject.replace(/^\s*New Message from\s*/i, "")).trim();
+  const role = (sm?.[2] ?? "").trim();
+  const clean = (s: string) =>
+    s
+      .replace(/[͏­​‌‍﻿]+/g, "")
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+  const snippetSrc = clean(m.snippet) || clean(m.bodyText ?? "");
+  return {
+    name,
+    role,
+    relay_email: extractEmail(m.from),
+    snippet: snippetSrc.slice(0, 200),
+    received_at: m.receivedAt,
+    message_id: m.id,
+    subject: m.subject,
+  };
+}
+
 function gmailAfterClause(sinceIso: string): string {
   const t = Date.parse(sinceIso);
   if (Number.isNaN(t)) throw new Error(`since_iso is not a valid date: ${sinceIso}`);
@@ -1177,9 +1223,20 @@ export async function getNewApplicants(
     // Indeed.
     const q = `(from:indeedemail.com OR from:indeed.com) ${after} -subject:debrief`;
     const msgs = await gmailSearchMessages(q, 50);
-    const junk = /debrief|digest|newsletter|billing|receipt|sponsor your job|performance report|invite candidates to apply/i;
-    const hits = msgs
-      .filter((m) => !junk.test(m.subject))
+    const junk = /debrief|digest|newsletter|billing|receipt|sponsor your job|performance report|invite candidates to apply|wasn't added to the conversation|attention required/i;
+    // 2026-09-04 (found live): "New Message from <Name> - <Job title>" emails are
+    // CANDIDATE REPLIES inside an existing Indeed thread — the candidate was
+    // already invited natively by Indeed's automation and is now answering
+    // ("completed the video", "is the role still open?", "please call me").
+    // They used to flow into `hits`, the agent extracted the relay address and
+    // "invited" them again by email, and Indeed rejected every one of those
+    // sends with "[Attention required] Your response wasn't added to the
+    // conversation" (1-5 bounces a day since at least 2026-08-31). Replies are
+    // now split out: never an invite target, always surfaced for Mo.
+    const isReply = (subject: string) => /^\s*New Message from\b/i.test(subject);
+    const kept = msgs.filter((m) => !junk.test(m.subject));
+    const hits = kept
+      .filter((m) => !isReply(m.subject))
       .map((m) => ({
         from: m.from,
         subject: m.subject,
@@ -1187,6 +1244,7 @@ export async function getNewApplicants(
         received_at: m.receivedAt,
         message_id: m.id,
       }));
+    const candidate_replies = kept.filter((m) => isReply(m.subject)).map((m) => parseIndeedReply(m));
     // Digests are still returned, but ONLY as volume context for the report —
     // never as a configuration signal. See the note below.
     const digestMsgs = await gmailSearchMessages(
@@ -1203,6 +1261,7 @@ export async function getNewApplicants(
       swept: true,
       mailbox_verified: mailbox,
       hits,
+      candidate_replies,
       digests,
       total: hits.length,
       note:
@@ -1211,6 +1270,10 @@ export async function getNewApplicants(
         "per Mo's 2026-08-18 ruling. A hit with no extractable candidate email = SKIP it quietly: " +
         "Indeed's bundled emails never carry candidate addresses, and those applicants have already " +
         "been invited natively by the posting's own Indeed 'Message new candidates' automation. " +
+        "candidate_replies = candidates who wrote back inside their Indeed thread (already invited " +
+        "natively). NEVER send_recruiting_invite to a reply — Indeed rejects it and the tool refuses. " +
+        "Instead list them under NEEDS YOU as 'Indeed replies waiting (<n>): Name (Role) — first words' " +
+        "(up to 3 names, then '+n more'), so Mo answers them in Indeed messaging. " +
         "digests = daily debrief summaries, VOLUME CONTEXT ONLY. Do NOT compare digest job titles " +
         "against hit titles, and NEVER raise a Needs-you item about per-application email settings " +
         "or an 'unconfigured posting' — missing individual emails is Indeed's normal bundling " +
@@ -1432,6 +1495,27 @@ export async function sendRecruitingInvite(args: {
       reason: `Daily send cap reached (${sendCap()}). Carry this candidate forward and tell Mo.`,
       sends_today: log.length,
     };
+  }
+
+  // 3b. Indeed relay guard (2026-09-04, found live): if this relay address has
+  //     ever WRITTEN to us ("New Message from …"), the candidate is already in
+  //     an Indeed thread — they were invited natively by the posting's own
+  //     automation and are now replying. Indeed rejects a fresh email into that
+  //     thread ("Your response wasn't added to the conversation"), so sending is
+  //     both pointless and a bounce. Refuse and route to Mo instead.
+  if (sendChannelFor(email) === "indeed_message") {
+    const inbound = await gmailSearchMessages(`from:${email} subject:"New Message from"`, 3);
+    if (inbound.length > 0) {
+      return {
+        sent: false,
+        reason:
+          `Indeed reply guard: ${first} ${last} already wrote back inside their Indeed thread ` +
+          `("${inbound[0].subject}", ${inbound[0].receivedAt}). Indeed rejects emails into that ` +
+          "thread, and they were invited natively when they applied. No email sent — list them under " +
+          "NEEDS YOU as an Indeed reply waiting for Mo.",
+        evidence: inbound.map((m) => ({ subject: m.subject, at: m.receivedAt })),
+      };
+    }
   }
 
   // 4. Dedup — Gmail: have we EVER emailed this address? (in:sent)

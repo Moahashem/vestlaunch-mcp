@@ -112,7 +112,9 @@ const TOOLS: ToolDef[] = [
       "'website' (Careers Application leads), 'wix' (contact-form submissions — often NOT " +
       "applicants, judge each), 'wizehire' (30-day minimum window enforced; ACD = our ACM role), " +
       "'indeed' (individual Indeed application notifications with FULL body — extract candidate " +
-      "name/email/role yourself; relay …@indeedemail.com addresses are valid invite targets), " +
+      "name/email/role yourself; relay …@indeedemail.com addresses are valid invite targets; also " +
+      "returns candidate_replies = candidates writing back in their Indeed thread — NEVER invite " +
+      "those, list them under NEEDS YOU for Mo), " +
       "'true_analysis' (broad catch-all — returns {from, subject, snippet} hits for you to eyeball), " +
       "'hazelequity' (mo@hazelequity.com catch-all; if it returns swept:false it is UNSWEPT — report " +
       "that, never 'zero applicants'). Every swept result includes mailbox_verified so an " +

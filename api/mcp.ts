@@ -1112,6 +1112,87 @@ async function actLeasingTriage(cfg: Cfg, rawArgs: Record<string, unknown>): Pro
   return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-triage" };
 }
 
+// --- SMART TOOLS: get_office_closures / set_office_closure ---
+// The lever Ruckus lacked on 2026-09-06 ("we're closed Monday for Labor Day —
+// make sure the leasing agent doesn't book tours"). Cranbrook's AI leasing
+// agent books tours through CALENDLY (cfa-tour), not ShowMojo; this records a
+// closure in ffl-crm so the agent treats the day as closed, names tours already
+// booked that day, and posts the record to RingCentral. The Calendly date
+// override itself has no API and stays a human step — the tool says so.
+const OFFICE_CLOSURES_TOOL_NAME = "get_office_closures";
+const OFFICE_CLOSURES_TOOL_DESC =
+  "Cranbrook Forest leasing office closures on record (holidays pre-loaded in code + any added at " +
+  "runtime), read-only. Each upcoming closure lists the tours ALREADY booked that day (name, time, " +
+  "contact) so someone can call to reschedule. Also returns the booking system (Calendly, event type " +
+  "cfa-tour — Cranbrook does NOT use ShowMojo) and the one manual step a closure still needs (a " +
+  "Calendly date override). No arguments. Requires ffl-crm GET " +
+  "/api/v1/analytics/leasing-office-closures and Bearer scope properties:read (or *).";
+const OFFICE_CLOSURES_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {},
+  additionalProperties: false,
+};
+
+async function getOfficeClosures(cfg: Cfg): Promise<unknown> {
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/analytics/leasing-office-closures");
+  if (!resp.success) {
+    throw new Error(
+      `leasing-office-closures endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/leasing-office-closures (ffl-crm) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-office-closures" };
+}
+
+const OFFICE_CLOSURE_SET_TOOL_NAME = "set_office_closure";
+const OFFICE_CLOSURE_SET_TOOL_DESC =
+  "Record (action='add') or lift (action='remove') a day the Cranbrook Forest leasing office is " +
+  "closed — a holiday, a training day, weather. Adding makes the AI leasing agent treat that day as " +
+  "closed immediately (it stops offering it, tells renters the next open day, and any Calendly " +
+  "booking that lands on it is auto-escalated to a person), posts the record to the RingCentral " +
+  "channel, and returns the tours ALREADY booked that day so someone can call them. date is " +
+  "YYYY-MM-DD in America/Chicago — compute it from today's date, never guess; past dates are refused. " +
+  "What this CANNOT do: block the day in Calendly itself (no API for that) — always tell the human " +
+  "that step remains: Calendly → cfa-tour → Availability → Date overrides. Cranbrook tours are " +
+  "Calendly, never ShowMojo. Requires ffl-crm POST /api/v1/analytics/leasing-office-closures and " +
+  "Bearer scope properties:read (or *).";
+const OFFICE_CLOSURE_SET_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    action: { type: "string" as const, enum: ["add", "remove"], description: "add a closure or remove a runtime one." },
+    date: { type: "string" as const, description: "The closed day, YYYY-MM-DD (America/Chicago)." },
+    reason: { type: "string" as const, description: "For add: why (e.g. 'Labor Day', 'staff training'). Shown to the team." },
+    by: { type: "string" as const, description: "Who asked for it (e.g. 'Mo via Ruckus'). Optional." },
+  },
+  required: ["action", "date"],
+  additionalProperties: false,
+};
+
+async function setOfficeClosure(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
+  const action = rawArgs.action;
+  const date = rawArgs.date;
+  if (action !== "add" && action !== "remove") throw new Error('action must be "add" or "remove".');
+  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("date must be YYYY-MM-DD.");
+  if (action === "add" && (typeof rawArgs.reason !== "string" || !rawArgs.reason.trim())) {
+    throw new Error("reason is required when adding a closure.");
+  }
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "POST", "/api/v1/analytics/leasing-office-closures", undefined, {
+    action,
+    date,
+    reason: typeof rawArgs.reason === "string" ? rawArgs.reason : undefined,
+    by: typeof rawArgs.by === "string" ? rawArgs.by : "Ruckus",
+  });
+  if (!resp.success) {
+    throw new Error(
+      `leasing-office-closures POST failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires POST /api/v1/analytics/leasing-office-closures (ffl-crm) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-office-closures" };
+}
+
 // server-computed Count per window, and pushes the numbers to ffl-crm; this reads
 // /api/v1/analytics/cf-lead-numbers - no fallback. READ-ONLY.
 const CF_LEADS_TOOL_NAME = "get_cf_lead_numbers";
@@ -1312,6 +1393,8 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
   const includeLeasingTriageTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_TOOL_NAME);
   const includeLeasingTriageActTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_ACT_TOOL_NAME);
+  const includeOfficeClosuresTool = !toolFilter || toolFilter.has(OFFICE_CLOSURES_TOOL_NAME);
+  const includeOfficeClosureSetTool = !toolFilter || toolFilter.has(OFFICE_CLOSURE_SET_TOOL_NAME);
   const includeCfLeadsTool = !toolFilter || toolFilter.has(CF_LEADS_TOOL_NAME);
   const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
@@ -1374,6 +1457,12 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeLeasingTriageActTool
         ? [{ name: LEASING_TRIAGE_ACT_TOOL_NAME, description: LEASING_TRIAGE_ACT_TOOL_DESC, inputSchema: LEASING_TRIAGE_ACT_TOOL_SCHEMA }]
+        : []),
+      ...(includeOfficeClosuresTool
+        ? [{ name: OFFICE_CLOSURES_TOOL_NAME, description: OFFICE_CLOSURES_TOOL_DESC, inputSchema: OFFICE_CLOSURES_TOOL_SCHEMA }]
+        : []),
+      ...(includeOfficeClosureSetTool
+        ? [{ name: OFFICE_CLOSURE_SET_TOOL_NAME, description: OFFICE_CLOSURE_SET_TOOL_DESC, inputSchema: OFFICE_CLOSURE_SET_TOOL_SCHEMA }]
         : []),
       ...(includeCfLeadsTool
         ? [{ name: CF_LEADS_TOOL_NAME, description: CF_LEADS_TOOL_DESC, inputSchema: CF_LEADS_TOOL_SCHEMA }]
@@ -1614,6 +1703,40 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${LEASING_TRIAGE_ACT_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === OFFICE_CLOSURES_TOOL_NAME) {
+      if (!includeOfficeClosuresTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getOfficeClosures(cfg);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${OFFICE_CLOSURES_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === OFFICE_CLOSURE_SET_TOOL_NAME) {
+      if (!includeOfficeClosureSetTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await setOfficeClosure(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${OFFICE_CLOSURE_SET_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

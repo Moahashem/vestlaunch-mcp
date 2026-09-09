@@ -14,6 +14,10 @@
  * half: >3 days without a browser run → the agent emails Mo. That watchdog is
  * the entire reason the sweep was split (the 11-day silent gap of 2026-08).
  *
+ * The kickoff prompt itself lives in ./_recruiting-sweep-prompt (split out
+ * 2026-09-09 so its stage list can be unit-tested). Stages: sweep → invite →
+ * watchdog → state → TestGorilla → NUDGE PASS → report.
+ *
  * Schedule: 11:50 UTC = 6:50 AM CT (CDT), after the 6:00–6:40 fleet, with a
  * 12:10 UTC retry (idempotent — the send tool's per-day log makes duplicate
  * emails impossible across retries).
@@ -33,6 +37,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logAgentRun, shouldSkipRedundantKickoff } from "../workforce-hub";
 import { postToRuckusChannel } from "../recruiting-report";
+import { DEFAULT_PROMPT } from "./_recruiting-sweep-prompt";
 
 export const config = { maxDuration: 60 };
 
@@ -41,80 +46,6 @@ const BETA_HEADER = "managed-agents-2026-04-01";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 const AGENT_KEY = "recruiting-sweep";
-
-const DEFAULT_PROMPT = [
-  "Run your daily CLOUD-half recruiting invite sweep for today (America/Chicago).",
-  "Follow your system prompt exactly. In short: (1) get_recruiting_state — read",
-  "last_run_cloud and last_run_browser; your sweep window starts at last_run_cloud",
-  "(minimum 2 days back; if the gap is larger, the window widens automatically —",
-  "say so in your report). (2) Sweep every cloud channel via get_new_applicants:",
-  "website, wix, wizehire, indeed, true_analysis, hazelequity. If hazelequity",
-  "returns swept:false, report it as UNSWEPT, never as zero applicants. The",
-  "indeed channel (added 2026-08-18) returns individual application emails with",
-  "full body — extract each candidate's name, email (relay …@indeedemail.com",
-  "addresses are valid), and role yourself; a hit with no extractable email is",
-  "skipped quietly (Indeed bundles applications at volume; those applicants were",
-  "already invited natively by the posting's own Indeed automation — this is NOT",
-  "a misconfiguration, never raise it). The indeed channel also returns",
-  "`candidate_replies` — candidates writing back inside their Indeed thread",
-  "(\"completed the video\", \"is the role still open\", \"please call me\"). NEVER",
-  "invite a reply (Indeed rejects it and the tool refuses); instead put them",
-  "under NEEDS YOU as 'Indeed replies waiting (<n>): Name (Role) — first words',",
-  "up to 3 names then '+n more', so Mo answers them in Indeed messaging. Never",
-  "invite from `digests` (volume context only), and ignore digest copies",
-  "appearing in true_analysis.",
-  "The Mac browser half is LinkedIn-ONLY now: only LinkedIn items go to",
-  "carry_forward for it. (3) For each",
-  "applicant, call send_recruiting_invite — dedup, the do-not-contact",
-  "list, and the daily cap are enforced inside the tool; if it refuses, accept",
-  "the refusal and log why. Since 2026-08-18 ALL roles are invitable (EA,",
-  "Virtual Sales, Virtual PM, VLS, Maintenance included — the tool maps each",
-  "role to its questionnaire; this supersedes any out-of-scope list in your",
-  "system prompt). If a role cannot be mapped the tool refuses — list that",
-  "applicant BY NAME + role in your report for Mo. Wix hits are often",
-  "property-owner sales leads, not applicants — only invite real job applicants.",
-  "(4) Watchdog: if last_run_browser is more than 3 days old, send_watchdog_alert",
-  "so Mo knows LinkedIn/Indeed are going stale. (5) update_recruiting_state:",
-  "set last_run_cloud to now — the CURRENT actual UTC time as full ISO, never a",
-  "rounded or future time — and carry_forward to anything unfinished.",
-  "(6) TestGorilla stage (added 2026-08-18, Mo's ask): read testgorilla_boundary",
-  "from state — its value is an object; the timestamp is its `boundary` field.",
-  "If the key is MISSING or the boundary unparsable, send NOTHING for this",
-  "stage and flag it under Needs-you. Otherwise call get_videoask_completers",
-  "with since_iso = that boundary (default question = Virtual PM final",
-  "screening question), then send_testgorilla_invite for each completer,",
-  "OLDEST first — dedup, cap, and do-not-contact are enforced in the tool;",
-  "accept refusals. NEVER skip a completer because their name is missing or is",
-  "an email address rather than a name — people mistype the VideoAsk name",
-  "field. Pass what you have and the greeting falls back to 'Hi there'; they",
-  "finished the screening, so they get the assessment. Afterwards update testgorilla_boundary keeping the object",
-  "shape: { boundary: <newest completed_at you actually PROCESSED (attempted",
-  "or dedup-refused)>, last_invited: <that person's name> }. If the",
-  "daily cap stops you, do NOT advance the boundary past the last processed",
-  "completer, and note the remaining backlog count in your report headline.",
-  "(7) report_recruiting_run with a one-line summary AND the `report` field.",
-  "FORMAT (Mo's rule, 2026-08-18 — headline + action items ONLY, never a log):",
-  "the `report` first line is ONE plain-English sentence with the outcome and",
-  "counts, e.g. '10 invites sent (8 EA, 2 Maint Coord); all 5 channels swept;",
-  "5 duplicates auto-blocked'. Then ONLY if something needs Mo, add a line that",
-  "is exactly 'NEEDS YOU:' on its own — that literal marker is what the tool",
-  "keys off to pull your reason out; anything above it is discarded — followed",
-  "by 1-3 short '- ' bullets. Needs-you items are:",
-  "Indeed candidate replies waiting (names + roles, see above),",
-  "unmappable-role applicants (by name + role), any UNSWEPT channel, watchdog",
-  "fired / last_run_browser more than 2 days old (say new Indeed/LinkedIn",
-  "applicants are waiting on his Mac), send errors, or anything else requiring",
-  "his action. A quiet day = the single headline line and NOTHING else. Never",
-  "list individual invitees, dedup refusals, per-channel zero counts, or",
-  "routine carry-forward — that detail lives in state and the run row, not in",
-  "Mo's message.",
-  "This fire may be a RETRY — that is normal; the send tool's per-day log makes",
-  "duplicate emails impossible, so simply continue any unfinished work. BUT if",
-  "last_run_cloud is less than 2 hours old, the first fire already completed:",
-  "do NOT re-sweep — call report_recruiting_run with status ok, summary",
-  "'retry no-op — first run already completed', and NO report field (so Mo is",
-  "not messaged twice), then stop.",
-].join(" ");
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;

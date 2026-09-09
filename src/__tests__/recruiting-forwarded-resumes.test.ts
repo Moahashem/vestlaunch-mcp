@@ -14,7 +14,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseForwardedApplicant,
   nameFromResumeSubject,
-} from "../../api/recruiting-tools.js";
+} from "../../api/recruiting-property-inbox.js";
 
 const SIG = `Sincerely,
 

@@ -57,6 +57,7 @@ import {
   getVideoaskPending,
   sendVideoaskReminder,
 } from "./recruiting-tools";
+import { getForwardedResumes } from "./recruiting-property-inbox";
 import { reportRecruitingRunWithRc } from "./recruiting-report";
 
 // 300s: the contact-index rebuild (first dedup call after 12h) pages every
@@ -102,6 +103,29 @@ const TOOLS: ToolDef[] = [
         query: { type: "string", description: "Search string — usually the candidate's last name." },
       },
       required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_forwarded_resumes",
+    description:
+      "Resumes emailed straight to the property and forwarded on to Mo (Cranbrook's on-site " +
+      "manager, sometimes via Yuliana). Reads the REAL message body and returns parsed, " +
+      "invitable applicants — treat them exactly like 'website' leads and pass each to " +
+      "send_recruiting_invite. The candidate is taken from the deepest non-internal From: line, " +
+      "so a double forward resolves to the candidate and never to us. Role is not stated in " +
+      "these emails, so it defaults to Assistant Community Manager (the open Cranbrook seat). " +
+      "Also returns `unparsed` — messages with no readable sender; surface those to Mo by " +
+      "subject instead of guessing. Added 2026-09-09 after five resumes arrived this way in one " +
+      "afternoon and the true_analysis catch-all could invite none of them (it only exposes a " +
+      "300-char snippet, and these bodies open with the property's signature block). " +
+      "Args: { since_iso }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        since_iso: { type: "string", description: "ISO timestamp — start of the sweep window." },
+      },
+      required: ["since_iso"],
       additionalProperties: false,
     },
   },
@@ -336,6 +360,8 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<un
       return getVideoaskCompleters(str(args, "question_id") || undefined, str(args, "since_iso"));
     case "search_videoask_contacts":
       return searchVideoaskContacts(str(args, "query"));
+    case "get_forwarded_resumes":
+      return getForwardedResumes(str(args, "since_iso"));
     case "get_new_applicants":
       return getNewApplicants(str(args, "channel"), str(args, "since_iso"));
     case "send_recruiting_invite":

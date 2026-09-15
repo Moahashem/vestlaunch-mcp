@@ -448,6 +448,24 @@ function encodeHeaderWord(s: string): string {
   return /^[\x20-\x7e]*$/.test(s) ? s : `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
 }
 
+/**
+ * Build a To header that carries the candidate's full name — `"First Last" <a@b.c>`.
+ *
+ * 2026-09-15: every invite used to go out with a bare address in To. That is
+ * why the nudge pass could never recover a LAST name from our own sent mail:
+ * nameFromToHeader() found nothing, the body greeting only holds "Hi First,",
+ * and send_videoask_reminder requires a surname for its dedup — so candidates
+ * sat un-nudged and got escalated to Mo as "first name only" records. Putting
+ * the name in the header makes our own Sent folder a complete roster again.
+ */
+export function formatToHeader(first: string, last: string | undefined, email: string): string {
+  const name = [first, last].map((s) => (s ?? "").trim()).filter(Boolean).join(" ");
+  if (!name) return email;
+  const safe = name.replace(/["\\\r\n<>]/g, "").trim();
+  if (!safe) return email;
+  return `${encodeHeaderWord(`"${safe}"`)} <${email}>`;
+}
+
 async function gmailSendMessage(to: string, subject: string, body: string): Promise<string> {
   const from = gmailImpersonatedUser();
   const raw = [
@@ -1429,6 +1447,8 @@ export interface SendResult {
    * Classified here, not guessed by the agent.
    */
   channel?: SendChannel;
+  /** Informational only — never a refusal. */
+  note?: string;
 }
 
 export type SendChannel = "email" | "indeed_message";
@@ -1565,7 +1585,9 @@ export async function sendRecruitingInvite(args: {
   // 6. Send (template + link are fixed server-side).
   const subject = `Next step for the ${roleDef.display} role – Flat Fee Landlord`;
   const body = INVITE_TEMPLATE(first, roleDef.display, roleDef.link, args.personal_note?.trim() || undefined);
-  const messageId = await gmailSendMessage(email, subject, body);
+  // Full name in the To header on purpose — see formatToHeader(). This is what
+  // lets the nudge pass recover the surname from our own Sent mail later.
+  const messageId = await gmailSendMessage(formatToHeader(first, last, email), subject, body);
 
   // 7. Append to today's log BEFORE returning (idempotency across retries).
   log.push({ email });
@@ -1856,11 +1878,55 @@ function roleFromInviteSubject(subject: string): string | undefined {
   return m?.[1]?.trim();
 }
 
+/**
+ * Split "First Last" / "First Middle Last" into the two parts the send tools
+ * need. A single token yields first only — never invent a surname.
+ */
+export function splitFullName(full: string | undefined): { first?: string; last?: string } {
+  const parts = (full ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return {};
+  if (parts.length === 1) return { first: parts[0] };
+  return { first: parts[0], last: parts[parts.length - 1] };
+}
+
+/**
+ * Our own send receipts (`sent_<day>` in workforce state) are the most
+ * authoritative name source there is: they hold the exact first + last name
+ * the agent passed to send_recruiting_invite, keyed by email. Reading them is
+ * how the nudge pass stops depending on what Gmail happened to keep in the To
+ * header (2026-09-15 — the "first name only" escalations to Mo).
+ *
+ * Reads one key per day across the reminder window, in parallel; a dead state
+ * store yields an empty map and the caller falls back to the mail-derived name.
+ */
+async function inviteReceiptNames(windowDays: number): Promise<Map<string, { name: string; role?: string }>> {
+  const out = new Map<string, { name: string; role?: string }>();
+  const days: string[] = [];
+  const now = Date.now();
+  for (let i = 0; i <= windowDays + 1; i += 1) {
+    days.push(chicagoDateStamp(new Date(now - i * 86400000)));
+  }
+  const reads = await Promise.allSettled(days.map((d) => readStateKey(`sent_${d}`)));
+  for (const r of reads) {
+    if (r.status !== "fulfilled" || !Array.isArray(r.value)) continue;
+    for (const e of r.value as Array<{ email?: string; name?: string; role?: string }>) {
+      const email = (e.email ?? "").trim().toLowerCase();
+      const name = (e.name ?? "").trim();
+      if (!email || !name || out.has(email)) continue;
+      out.set(email, { name, role: e.role });
+    }
+  }
+  return out;
+}
+
 export interface PendingCandidate {
   email: string;
   name?: string;
+  /** Split of `name`, ready to pass straight to send_videoask_reminder. */
+  first_name?: string;
+  last_name?: string;
   /** Where `name` came from — never the email address. */
-  name_source?: "to_header" | "invite_greeting";
+  name_source?: "send_receipt" | "to_header" | "invite_greeting";
   role?: string;
   invited_at: string;
   days_waiting: number;
@@ -1911,6 +1977,10 @@ export async function getVideoaskPending(
   const index = await getContactIndex();
   const completedEmails = new Set(index.contacts.map((c) => (c.e ?? "").toLowerCase()).filter(Boolean));
 
+  // Full names from our own send receipts — the authoritative source. Mail
+  // headers and greetings are the fallback, not the other way round.
+  const receipts = await inviteReceiptNames(reminderWindowDays() + days);
+
   const seen = new Set<string>();
   const pending: PendingCandidate[] = [];
   let alreadyReminded = 0;
@@ -1934,12 +2004,17 @@ export async function getVideoaskPending(
       continue;
     }
     const sentAt = Date.parse(m.receivedAt);
-    const headerName = nameFromToHeader(m.to);
-    const greetingName = headerName ? undefined : firstNameFromInviteBody(m.bodyText);
+    const receipt = receipts.get(email);
+    const headerName = receipt ? undefined : nameFromToHeader(m.to);
+    const greetingName = receipt || headerName ? undefined : firstNameFromInviteBody(m.bodyText);
+    const name = receipt?.name ?? headerName ?? greetingName;
+    const split = splitFullName(name);
     pending.push({
       email,
-      name: headerName ?? greetingName,
-      name_source: headerName ? "to_header" : greetingName ? "invite_greeting" : undefined,
+      name,
+      first_name: split.first,
+      last_name: split.last,
+      name_source: receipt ? "send_receipt" : headerName ? "to_header" : greetingName ? "invite_greeting" : undefined,
       role: roleFromInviteSubject(m.subject),
       invited_at: m.receivedAt,
       days_waiting: Number.isNaN(sentAt) ? 0 : Math.floor((Date.now() - sentAt) / 86400000),
@@ -1971,14 +2046,37 @@ export async function getVideoaskPending(
 export async function sendVideoaskReminder(args: {
   email: string;
   first_name: string;
-  last_name: string;
+  /**
+   * Optional since 2026-09-15. When omitted the tool recovers it from our own
+   * send receipt for this email; when no receipt exists either, the engagement
+   * check runs on EMAIL instead of surname (still fail-closed). A missing
+   * surname is no longer a reason to leave a candidate un-nudged and page Mo.
+   */
+  last_name?: string;
   role?: string;
 }): Promise<SendResult> {
   const email = args.email.trim().toLowerCase();
   const first = args.first_name.trim();
-  const last = args.last_name.trim();
+  let last = (args.last_name ?? "").trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error(`"${args.email}" is not a valid email.`);
-  if (!first || !last) throw new Error("first_name and last_name are both required (last name drives dedup).");
+  if (!first) throw new Error("first_name is required (it is the greeting).");
+
+  // Recover the surname from our own send receipt when the caller has none.
+  // The receipt holds exactly what was passed to send_recruiting_invite.
+  let nameSource: "caller" | "send_receipt" | "none" = last ? "caller" : "none";
+  if (!last) {
+    try {
+      const receipts = await inviteReceiptNames(reminderWindowDays() + reminderDelayDays());
+      const r = receipts.get(email);
+      const split = splitFullName(r?.name);
+      if (split.last) {
+        last = split.last;
+        nameSource = "send_receipt";
+      }
+    } catch {
+      // Best-effort — fall through to the email-based check below.
+    }
+  }
 
   // 0. Never greet an initial. On the first live run (2026-08-20) three people were
   //    emailed "Hi C,", "Hi R," and "Hi B," because get_videoask_pending returned no
@@ -1996,19 +2094,19 @@ export async function sendVideoaskReminder(args: {
         "by email and move on.",
     };
   }
-  if (last.length < 2 || !/^[A-Za-z]/.test(last)) {
+  if (last && (last.length < 2 || !/^[A-Za-z]/.test(last))) {
     return {
       sent: false,
       reason:
         `last_name "${last}" is not a usable surname, and dedup runs on it. Refusing — use the name ` +
-        "from get_videoask_pending or report this candidate by email.",
+        "from get_videoask_pending, or omit last_name and let the tool resolve it.",
     };
   }
 
   // 1. Denylist.
-  const fullName = `${first} ${last}`.toLowerCase();
+  const fullName = [first, last].filter(Boolean).join(" ").toLowerCase();
   if (DENYLIST_NAMES.some((n) => fullName.includes(n))) {
-    return { sent: false, reason: `"${first} ${last}" is on Mo's do-not-contact list. No email sent.` };
+    return { sent: false, reason: `"${fullName}" is on Mo's do-not-contact list. No email sent.` };
   }
 
   // 2. Per-day log: cap + same-day idempotency (safe across cron retries).
@@ -2065,13 +2163,21 @@ export async function sendVideoaskReminder(args: {
   // 5. Have they already engaged? Fail CLOSED, exactly like the invite path:
   //    if the contact index is unreachable we refuse rather than risk nudging
   //    someone who already recorded their video.
+  //
+  //    With a surname: search by surname and match on email OR full name (the
+  //    Rocky Garza rule — people finish under a different address).
+  //    Without one (2026-09-15): search by EMAIL. Narrower, but still fail-closed,
+  //    and the worst case is one polite "ignore this if you already did it"
+  //    email to someone who completed under another address — far cheaper than
+  //    the old outcome, which was no nudge at all plus a chore for Mo.
   try {
-    const res = await searchVideoaskContacts(last);
+    const res = await searchVideoaskContacts(last || email);
     const hit = res.hits.find(
       (h) =>
         (h.email ?? "").toLowerCase() === email ||
-        (h.name ?? "").toLowerCase().includes(fullName) ||
-        (h.name ?? "").toLowerCase().includes(`${last.toLowerCase()}, ${first.toLowerCase()}`),
+        (last !== "" &&
+          ((h.name ?? "").toLowerCase().includes(fullName) ||
+            (h.name ?? "").toLowerCase().includes(`${last.toLowerCase()}, ${first.toLowerCase()}`))),
     );
     if (hit) {
       return {
@@ -2118,7 +2224,8 @@ export async function sendVideoaskReminder(args: {
     ...log.slice(0, -1),
     {
       email,
-      name: `${first} ${last}`,
+      name: [first, last].filter(Boolean).join(" "),
+      name_source: nameSource,
       role: roleDef.display,
       invited_at: inviteMatches[0]?.receivedAt,
       at: new Date().toISOString(),
@@ -2134,6 +2241,7 @@ export async function sendVideoaskReminder(args: {
     gmail_message_id: messageId,
     sends_today: log.length,
     channel: sendChannelFor(email),
+    ...(nameSource === "none" ? { note: "No surname on file — engagement check ran on email only." } : {}),
   };
 }
 

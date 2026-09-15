@@ -263,7 +263,8 @@ const TOOLS: ToolDef[] = [
       "Send THE follow-up nudge (fixed template + role-mapped link, from mo@flatfeelandlord.com) " +
       "to ONE candidate returned by get_videoask_pending. Enforced server-side: do-not-contact " +
       "list, per-day cap, same-day idempotency, ONE nudge per candidate ever (subject-scoped " +
-      "Gmail dedup), proof that WE invited them (refuses otherwise), and a fail-CLOSED VideoAsk " +
+      "Gmail dedup), proof that WE invited them (refuses otherwise), a WROTE BACK guard (any email " +
+      "from the candidate since the invite refuses the nudge — surface them to Mo instead), and a fail-CLOSED VideoAsk " +
       "contact check so anyone who already engaged is never nudged. If it refuses, accept the " +
       "refusal and report the one-line why — never retry with altered names. Every send tool returns " +
       "`channel`: \"indeed_message\" when the address is an Indeed relay (…@indeedemail.com — the " +

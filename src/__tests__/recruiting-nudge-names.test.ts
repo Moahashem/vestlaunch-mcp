@@ -84,4 +84,9 @@ describe("send_videoask_reminder no longer requires a surname", () => {
     expect(DEFAULT_PROMPT).toContain("never a NEEDS YOU item");
     expect(DEFAULT_PROMPT).toContain("Never invent a last name");
   });
+
+  it("routes WROTE BACK refusals to Mo as email replies waiting", () => {
+    expect(DEFAULT_PROMPT).toContain("WROTE BACK");
+    expect(DEFAULT_PROMPT).toContain("Email replies waiting");
+  });
 });

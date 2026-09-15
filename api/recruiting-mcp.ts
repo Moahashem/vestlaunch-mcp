@@ -236,10 +236,14 @@ const TOOLS: ToolDef[] = [
       "Newest invite first — recent applicants convert, so the daily cap is not spent on the " +
       "coldest names in the window. Only invites from the last 21 days are considered " +
       "(VIDEOASK_REMINDER_WINDOW_DAYS); anything older is left alone deliberately. " +
-      "USE THE RETURNED `name` verbatim when calling send_videoask_reminder, and NEVER derive a name " +
-      "from the email address (cblake822@gmail.com is not \"C Blake\" — that mistake greeted three " +
-      "candidates as \"Hi C,\" on 2026-08-20). A candidate with no `name` has no recoverable name: " +
-      "skip them and report the email. The send tool now refuses one-letter names outright. " +
+      "USE THE RETURNED `first_name` / `last_name` verbatim when calling send_videoask_reminder, and " +
+      "NEVER derive a name from the email address (cblake822@gmail.com is not \"C Blake\" — that " +
+      "mistake greeted three candidates as \"Hi C,\" on 2026-08-20). Since 2026-09-15 names come " +
+      "first from our own send receipts (name_source \"send_receipt\"), so a full name is the norm. " +
+      "A candidate with a first_name but NO last_name is still nudgeable — call the send tool with " +
+      "first_name only and it resolves or works around the surname itself; this is NOT a needs-you " +
+      "item. Only a candidate with no `name` at all is skipped (report the email in the run row, not " +
+      "to Mo). The send tool refuses one-letter names outright. " +
       "Args: { days_since_invite? (default 3), limit? (default 25) }.",
     inputSchema: {
       type: "object",
@@ -264,17 +268,24 @@ const TOOLS: ToolDef[] = [
       "refusal and report the one-line why — never retry with altered names. Every send tool returns " +
       "`channel`: \"indeed_message\" when the address is an Indeed relay (…@indeedemail.com — the " +
       "candidate reads it inside their Indeed message thread) or \"email\" otherwise. Tally those for " +
-      "the daily report. Args: { email, " +
-      "first_name, last_name, role? (recovered from our invite when omitted) }.",
+      "the daily report. Args: { email, first_name, last_name? (optional since 2026-09-15 — " +
+      "recovered from our own send receipt when omitted; if none exists the engagement check runs " +
+      "on email instead, still fail-closed), role? (recovered from our invite when omitted) }. " +
+      "Never invent a last_name to satisfy this tool — leave it out.",
     inputSchema: {
       type: "object",
       properties: {
         email: { type: "string", description: "Candidate email address." },
         first_name: { type: "string", description: "Candidate first name (greeting)." },
-        last_name: { type: "string", description: "Candidate last name (drives the contacts dedup)." },
+        last_name: {
+          type: "string",
+          description:
+            "Candidate last name (drives the contacts dedup). Optional — omit when unknown and the " +
+            "tool resolves it from our send receipt or falls back to an email-based check.",
+        },
         role: { type: "string", description: "Role, if known; otherwise recovered server-side." },
       },
-      required: ["email", "first_name", "last_name"],
+      required: ["email", "first_name"],
       additionalProperties: false,
     },
   },
@@ -388,7 +399,7 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<un
       return sendVideoaskReminder({
         email: str(args, "email"),
         first_name: str(args, "first_name"),
-        last_name: str(args, "last_name"),
+        last_name: str(args, "last_name") || undefined,
         role: str(args, "role") || undefined,
       });
     case "send_watchdog_alert":

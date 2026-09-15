@@ -2160,6 +2160,35 @@ export async function sendVideoaskReminder(args: {
     };
   }
 
+  // 4b. Wrote back? Then this is a live conversation and belongs to Mo, not to
+  //     an automated reminder. Mo's 2026-09-09 ruling ("never to someone who
+  //     wrote back") used to be enforced only by the agent cross-checking Indeed
+  //     replies; a reply sitting in the Gmail thread itself was invisible to it
+  //     (2026-09-15: a candidate answered "the link had expired" three days
+  //     before the nudge pass would have pinged her again). Enforced here now.
+  //     Best-effort: a Gmail hiccup must not block the whole pass, and the
+  //     agent-side cross-check still applies.
+  try {
+    const sinceInvite = Date.parse(inviteMatches[0]?.receivedAt ?? "");
+    const replies = await gmailSearchMessages(`from:${email} newer_than:${reminderWindowDays() + 7}d`, 3);
+    const reply = replies.find((m) => {
+      const t = Date.parse(m.receivedAt);
+      return Number.isNaN(sinceInvite) || Number.isNaN(t) || t >= sinceInvite;
+    });
+    if (reply) {
+      return {
+        sent: false,
+        reason:
+          `${first}${last ? ` ${last}` : ""} already WROTE BACK (${reply.receivedAt}: "${reply.snippet.slice(0, 120)}"). ` +
+          "A replier is a live conversation — no automated nudge. If their reply is unanswered, list them " +
+          "under NEEDS YOU as an email reply waiting for Mo.",
+        evidence: [{ subject: reply.subject, at: reply.receivedAt, snippet: reply.snippet.slice(0, 200) }],
+      };
+    }
+  } catch {
+    // fall through — the engagement check below still runs fail-closed
+  }
+
   // 5. Have they already engaged? Fail CLOSED, exactly like the invite path:
   //    if the contact index is unreachable we refuse rather than risk nudging
   //    someone who already recorded their video.

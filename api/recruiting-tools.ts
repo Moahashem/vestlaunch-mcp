@@ -1394,8 +1394,33 @@ export async function updateRecruitingState(key: string, value: unknown): Promis
   if (/^(sent_|watchdog_sent_|testgorilla_sent_|videoask_reminder_sent_|videoask_contact_index)/.test(k)) {
     throw new Error(`key "${k}" is reserved for the tools' internal logs/index.`);
   }
-  await crmStateRequest("POST", undefined, { agentKey: AGENT_STATE_KEY, key: k, value });
-  return { saved: true, agentKey: AGENT_STATE_KEY, key: k };
+  const { value: v, note } = sanitizeRunTimestamp(k, value);
+  await crmStateRequest("POST", undefined, { agentKey: AGENT_STATE_KEY, key: k, value: v });
+  return { saved: true, agentKey: AGENT_STATE_KEY, key: k, ...(note ? { note, value: v } : {}) };
+}
+
+/**
+ * last_run_cloud / last_run_browser must be real, past instants. 2026-09-15 the
+ * agent wrote last_run_cloud as a time ~45 minutes in the FUTURE, so the retry
+ * slot's "less than 2 hours old → no-op" rule could not trip and the whole
+ * sweep ran twice, messaging Mo twice. Clamp to now; reject junk outright.
+ * Exported for the test.
+ */
+export function sanitizeRunTimestamp(key: string, value: unknown): { value: unknown; note?: string } {
+  if (key !== "last_run_cloud" && key !== "last_run_browser") return { value };
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new Error(`${key} must be a full ISO-8601 timestamp string (got ${JSON.stringify(value)}).`);
+  }
+  const t = Date.parse(value);
+  const now = Date.now();
+  if (t > now + 60_000) {
+    const clamped = new Date(now).toISOString();
+    return {
+      value: clamped,
+      note: `${key} was in the future (${value}); stored the current time ${clamped} instead. Always pass the actual current UTC time.`,
+    };
+  }
+  return { value: new Date(t).toISOString() };
 }
 
 async function readStateKey(key: string): Promise<unknown> {

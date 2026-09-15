@@ -18,9 +18,15 @@
  * 2026-09-09 so its stage list can be unit-tested). Stages: sweep → invite →
  * watchdog → state → TestGorilla → NUDGE PASS → report.
  *
- * Schedule: 11:50 UTC = 6:50 AM CT (CDT), after the 6:00–6:40 fleet, with a
- * 12:10 UTC retry (idempotent — the send tool's per-day log makes duplicate
- * emails impossible across retries).
+ * Schedule (vercel.json): 13:30 UTC = 8:30 AM CT (CDT), with a 13:50 UTC
+ * retry slot. Emails are idempotent across retries (per-day send logs), but a
+ * retry that re-runs the whole sweep still costs a session and messages Mo
+ * twice — which is exactly what happened 2026-09-15. So the retry slot is
+ * gated SERVER-SIDE: if the agent has already filed today's finished-run row
+ * (any ok/partial row that is not one of our own "triggered" kickoff rows),
+ * the slot is skipped here and the agent never wakes. The prompt-level
+ * "last_run_cloud < 2h → no-op" rule stays as a second line of defense, and
+ * update_recruiting_state now clamps future timestamps so it can trip.
  *
  * Auth: CRON_SECRET Bearer, same as every other cron here.
  *
@@ -46,6 +52,20 @@ const BETA_HEADER = "managed-agents-2026-04-01";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 const AGENT_KEY = "recruiting-sweep";
+/** Prefix of every run row THIS cron writes (kickoff bookkeeping, not results). */
+const KICKOFF_SUMMARY_PREFIX = "recruiting sweep";
+
+/**
+ * A finished-run row is anything the AGENT filed today via report_recruiting_run:
+ * status ok/partial and a summary that is not our own kickoff/failure bookkeeping.
+ * Exported for the test.
+ */
+export function isFinishedSweepRow(row: { status?: string; summary?: string }): boolean {
+  const summary = (row.summary ?? "").trim().toLowerCase();
+  if (!summary) return false;
+  if (summary.startsWith(KICKOFF_SUMMARY_PREFIX)) return false;
+  return row.status === "ok" || row.status === "partial";
+}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
@@ -82,8 +102,8 @@ export default async function handler(
   // redundant -- skip it instead of waking (and paying for) another full agent
   // session. Fail-open: any doubt and we run exactly as before. See
   // workforce-hub.ts for semantics.
-  if (await shouldSkipRedundantKickoff(AGENT_KEY)) {
-    json(res, 200, { ok: true, skipped: "spend guard: already ran ok twice today" });
+  if (await shouldSkipRedundantKickoff(AGENT_KEY, { completionPredicate: isFinishedSweepRow })) {
+    json(res, 200, { ok: true, skipped: "spend guard: today's sweep already reported (or ran ok twice)" });
     return;
   }
 

@@ -183,6 +183,15 @@ export interface SpendGuardOptions {
    * 12:50/13:00 slots of the occupancy/showmojo ladders.
    */
   healWindowStartUtcMinutes?: number;
+  /**
+   * Extra completion signal (2026-09-15). Some agents report their finished
+   * run as an ordinary run row rather than a WORK COMPLETE marker — the
+   * recruiting sweep, for one, whose kickoff rows and finished-run rows share
+   * an agentKey. When set, ANY run row from today (ok or partial) matching this
+   * predicate counts as "done" and every later slot skips, heal window
+   * included. The predicate receives the raw hub row.
+   */
+  completionPredicate?: (row: { status?: string; summary?: string; payload?: unknown }) => boolean;
 }
 
 /**
@@ -201,22 +210,42 @@ export async function shouldSkipRedundantKickoff(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
+    // With a completion predicate we need partial rows too, so the status
+    // filter is dropped and re-applied below for the kickoff count.
+    const statusFilter = opts?.completionPredicate ? "" : "&status=ok";
     const url =
       `${hubBaseUrl()}/api/v1/agent/run-status?agentKey=${encodeURIComponent(agentKey)}` +
-      `&status=ok&since=${encodeURIComponent(startOfTodayChicagoISO())}&limit=20`;
+      `${statusFilter}&since=${encodeURIComponent(startOfTodayChicagoISO())}&limit=50`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: controller.signal,
     });
     if (!res.ok) return false; // 403 (no agent:read) or anything else → fail open
-    const body = (await res.json()) as { data?: Array<{ summary?: unknown }> };
-    const rows = Array.isArray(body?.data) ? body.data : [];
+    const body = (await res.json()) as {
+      data?: Array<{ status?: string; summary?: unknown; payload?: unknown }>;
+    };
+    const allRows = Array.isArray(body?.data) ? body.data : [];
+    const rows = opts?.completionPredicate
+      ? allRows.filter((r) => (r?.status ?? "ok") === "ok")
+      : allRows;
 
     // 1. Confirmed complete → every remaining slot is redundant.
     const workComplete = rows.some(
       (r) => typeof r?.summary === "string" && r.summary.startsWith(WORK_COMPLETE_PREFIX),
     );
     if (workComplete) return true;
+    if (opts?.completionPredicate) {
+      const pred = opts.completionPredicate;
+      const done = allRows.some((r) => {
+        if (!r || (r.status !== "ok" && r.status !== "partial")) return false;
+        try {
+          return pred({ status: r.status, summary: typeof r.summary === "string" ? r.summary : "", payload: r.payload });
+        } catch {
+          return false;
+        }
+      });
+      if (done) return true;
+    }
 
     // 2. Not confirmed complete: the heal window (final slots) always runs —
     //    it is the retry + alert pass for a morning session that died mid-run.

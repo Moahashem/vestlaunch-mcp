@@ -1290,8 +1290,10 @@ export async function getNewApplicants(
         "been invited natively by the posting's own Indeed 'Message new candidates' automation. " +
         "candidate_replies = candidates who wrote back inside their Indeed thread (already invited " +
         "natively). NEVER send_recruiting_invite to a reply — Indeed rejects it and the tool refuses. " +
-        "Instead list them under NEEDS YOU as 'Indeed replies waiting (<n>): Name (Role) — first words' " +
-        "(up to 3 names, then '+n more'), so Mo answers them in Indeed messaging. " +
+        "Sort them (Mo, 2026-09-16): a courtesy reply (thanks / done / 'videos completed', no question) " +
+        "is a headline count only — Mo screens finishers himself and reaches out if interested. Only a " +
+        "reply with a real question, request or problem goes under NEEDS YOU as 'Indeed replies waiting " +
+        "(<n>): Name (Role) — first words' (up to 3 names, then '+n more'), so Mo answers it in Indeed messaging. " +
         "digests = daily debrief summaries, VOLUME CONTEXT ONLY. Do NOT compare digest job titles " +
         "against hit titles, and NEVER raise a Needs-you item about per-application email settings " +
         "or an 'unconfigured posting' — missing individual emails is Indeed's normal bundling " +

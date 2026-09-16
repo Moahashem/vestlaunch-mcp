@@ -1112,6 +1112,136 @@ async function actLeasingTriage(cfg: Cfg, rawArgs: Record<string, unknown>): Pro
   return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-triage" };
 }
 
+// --- SMART TOOL: record_tour_outcome (Mo, 2026-09-16) ---
+// "Is Ruckus smart enough that if I tell it the outcome it can tell the agent
+// and move the stage in LeadSimple?" — it was not: recording Toured/No-show was
+// a desk-page button only. This is the pen. The OBSERVER is still a person:
+// reportedBy is required and is written onto the record. The CRM refuses a
+// second, different answer (first word stands) and moves the LeadSimple card
+// (toured → Tour Follow-Up, no_show → Tour No Show) best-effort.
+const TOUR_OUTCOME_TOOL_NAME = "record_tour_outcome";
+const TOUR_OUTCOME_TOOL_DESC =
+  "Record that a Cranbrook tour happened (toured) or the renter did not come (no_show), on a PERSON's " +
+  "word — Mo, Sergio or the Cranbrook office telling you in RingCentral, or answering the 8 PM ask. " +
+  "Pass reportedBy = that person's name; never yours, never inferred from a transcript or from silence. " +
+  "Identify the renter by conversationId (from get_leasing_triage.unrecordedTours) OR by renterName — a " +
+  "name is matched against the past tours still missing an outcome; if it matches nobody or more than one, " +
+  "the tool returns the candidates instead of guessing — list them and ask. The CRM writes the outcome and " +
+  "the reporter's name into the conversation, and moves the LeadSimple card (toured → 'Tour Follow-Up " +
+  "(didn't apply)', no_show → 'Tour No Show') when the stage ids are configured; read `leadsimple` in the " +
+  "result and say what happened to the card. An outcome already on record is returned as ok:false / " +
+  "already_recorded — say what is on record, do not claim you recorded it. Requires ffl-crm POST " +
+  "/api/v1/leasing/conversations/:id/tour-outcome and a key with scope leasing:write (or *).";
+const TOUR_OUTCOME_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    outcome: { type: "string" as const, enum: ["toured", "no_show"], description: "What the person said happened." },
+    reportedBy: {
+      type: "string" as const,
+      description: "The PERSON who observed or reported the outcome, e.g. 'Mo Hashem'. Required. Never an agent.",
+    },
+    conversationId: { type: "string" as const, description: "Leasing conversation id, when you have it." },
+    renterName: {
+      type: "string" as const,
+      description: "The renter's name as the person wrote it (e.g. 'Jameisha', 'Walter B'), when you have no id.",
+    },
+  },
+  required: ["outcome", "reportedBy"],
+  additionalProperties: false,
+};
+
+function normName(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Match a person's loose spelling ("Walter", "walter b", "Jameisha Rogers")
+ * against the unrecorded-tour roster. Exact full-name match wins; otherwise
+ * every roster row whose full name starts with / contains the given words is
+ * a candidate. One candidate = a match; zero or several = ask, never guess.
+ */
+export function matchUnrecordedTour(
+  renterName: string,
+  roster: Array<{ conversationId: string; name: string | null }>,
+): { match?: { conversationId: string; name: string | null }; candidates: Array<{ conversationId: string; name: string | null }> } {
+  const q = normName(renterName);
+  if (!q) return { candidates: [] };
+  const rows = roster.filter((r) => r.name);
+  const exact = rows.filter((r) => normName(r.name!) === q);
+  if (exact.length === 1) return { match: exact[0], candidates: exact };
+  if (exact.length > 1) return { candidates: exact };
+  const words = q.split(" ");
+  const loose = rows.filter((r) => {
+    const n = normName(r.name!);
+    const parts = n.split(" ");
+    // every query word must prefix-match some word of the roster name
+    return words.every((w) => parts.some((p) => p.startsWith(w)));
+  });
+  if (loose.length === 1) return { match: loose[0], candidates: loose };
+  return { candidates: loose };
+}
+
+async function recordTourOutcome(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
+  const outcome = rawArgs.outcome;
+  if (outcome !== "toured" && outcome !== "no_show") throw new Error('outcome must be "toured" or "no_show".');
+  const reportedBy = typeof rawArgs.reportedBy === "string" ? rawArgs.reportedBy.trim() : "";
+  if (!reportedBy) throw new Error("reportedBy is required — the name of the PERSON who said so.");
+  if (/\b(ruckus|agent|assistant|claude|bot)\b/i.test(reportedBy)) {
+    throw new Error("reportedBy must be a person, not an agent. Who told you the outcome?");
+  }
+
+  let conversationId = typeof rawArgs.conversationId === "string" ? rawArgs.conversationId.trim() : "";
+  let matchedName: string | null = null;
+
+  if (!conversationId) {
+    const renterName = typeof rawArgs.renterName === "string" ? rawArgs.renterName.trim() : "";
+    if (!renterName) throw new Error("Give conversationId or renterName.");
+    const triage = (await getLeasingTriage(cfg)) as { unrecordedTours?: Array<{ conversationId: string; name: string | null; startTime?: string; daysAgo?: number }> };
+    const roster = (triage.unrecordedTours ?? []).map((t) => ({ conversationId: t.conversationId, name: t.name ?? null, startTime: t.startTime, daysAgo: t.daysAgo }));
+    const { match, candidates } = matchUnrecordedTour(renterName, roster);
+    if (!match) {
+      return {
+        ok: false,
+        reason: candidates.length === 0 ? "no_match" : "ambiguous",
+        renterName,
+        candidates: candidates.length > 0 ? candidates : roster,
+        hint:
+          candidates.length === 0
+            ? "Nobody on the unrecorded-tour list matches that name. Show the person the list above and ask which one they mean (or whether the tour was never booked through the agent)."
+            : "More than one unrecorded tour matches. Show the candidates and ask which one.",
+      };
+    }
+    conversationId = match.conversationId;
+    matchedName = match.name;
+  }
+
+  const resp = await crmRequest<Record<string, unknown>>(
+    cfg,
+    "POST",
+    `/api/v1/leasing/conversations/${encodeURIComponent(conversationId)}/tour-outcome`,
+    undefined,
+    { outcome, reportedBy },
+  );
+  if (!resp.success) {
+    throw new Error(
+      `tour-outcome POST failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires POST /api/v1/leasing/conversations/:id/tour-outcome (ffl-crm) to be deployed " +
+        "and the Bearer key to have scope leasing:write (or *).",
+    );
+  }
+  return {
+    ...(resp.data as Record<string, unknown>),
+    ...(matchedName ? { matchedName } : {}),
+    source: "native:/api/v1/leasing/conversations/:id/tour-outcome",
+  };
+}
+
 // --- SMART TOOLS: get_office_closures / set_office_closure ---
 // The lever Ruckus lacked on 2026-09-06 ("we're closed Monday for Labor Day —
 // make sure the leasing agent doesn't book tours"). Cranbrook's AI leasing
@@ -1393,6 +1523,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
   const includeLeasingTriageTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_TOOL_NAME);
   const includeLeasingTriageActTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_ACT_TOOL_NAME);
+  const includeTourOutcomeTool = !toolFilter || toolFilter.has(TOUR_OUTCOME_TOOL_NAME);
   const includeOfficeClosuresTool = !toolFilter || toolFilter.has(OFFICE_CLOSURES_TOOL_NAME);
   const includeOfficeClosureSetTool = !toolFilter || toolFilter.has(OFFICE_CLOSURE_SET_TOOL_NAME);
   const includeCfLeadsTool = !toolFilter || toolFilter.has(CF_LEADS_TOOL_NAME);
@@ -1457,6 +1588,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeLeasingTriageActTool
         ? [{ name: LEASING_TRIAGE_ACT_TOOL_NAME, description: LEASING_TRIAGE_ACT_TOOL_DESC, inputSchema: LEASING_TRIAGE_ACT_TOOL_SCHEMA }]
+        : []),
+      ...(includeTourOutcomeTool
+        ? [{ name: TOUR_OUTCOME_TOOL_NAME, description: TOUR_OUTCOME_TOOL_DESC, inputSchema: TOUR_OUTCOME_TOOL_SCHEMA }]
         : []),
       ...(includeOfficeClosuresTool
         ? [{ name: OFFICE_CLOSURES_TOOL_NAME, description: OFFICE_CLOSURES_TOOL_DESC, inputSchema: OFFICE_CLOSURES_TOOL_SCHEMA }]
@@ -1703,6 +1837,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${LEASING_TRIAGE_ACT_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === TOUR_OUTCOME_TOOL_NAME) {
+      if (!includeTourOutcomeTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await recordTourOutcome(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${TOUR_OUTCOME_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

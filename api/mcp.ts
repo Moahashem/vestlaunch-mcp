@@ -1242,6 +1242,119 @@ async function recordTourOutcome(cfg: Cfg, rawArgs: Record<string, unknown>): Pr
   };
 }
 
+// --- SMART TOOL: close_lead_lost (Mo, 2026-09-16, 8:01 PM) ---
+// "allannah also toured but i dont think she really qualifies so just move
+// her to lost" — Ruckus recorded the tour, moved the card to Tour Follow-Up,
+// then told Mo that Lost was a manual step. It was not supposed to be, and the
+// 45-day post-tour cadence would have kept texting her. This is the pen for
+// "a person decided this lead is lost": the CRM closes the conversation (which
+// stops every automated follow-up), writes who/why, and moves the LeadSimple
+// card to Lost. The DECIDER is still a person: reportedBy is required.
+const CLOSE_LOST_TOOL_NAME = "close_lead_lost";
+const CLOSE_LOST_TOOL_DESC =
+  "Mark a Cranbrook lead LOST because a PERSON decided so — Mo, Sergio or the office telling you in " +
+  "RingCentral ('she doesn't really qualify, move her to lost', 'he found another place', 'stop following " +
+  "up with her'). Pass reportedBy = that person's name (the RingCentral sender of the message, unless they " +
+  "are relaying someone else's decision); never yours. Pass reason = their words for why, when given. " +
+  "Identify the renter by conversationId OR by renterName — a name is matched against the leasing " +
+  "conversations (closed ones included); if it matches nobody or more than one, the tool returns the " +
+  "candidates instead of guessing — list them and ask. The CRM closes the conversation (this is what " +
+  "STOPS the post-tour cadence, the drip and every automated follow-up), writes who/why into the " +
+  "transcript, and moves the LeadSimple card to 'Lost' with a note; read `leadsimple` in the result and " +
+  "say what happened to the card (`stageDropped` means ResMan shows an application, so the card kept its " +
+  "application stage and only got the note). Idempotent: an already-lost lead returns wasAlreadyClosed " +
+  "true. Use record_tour_outcome FIRST when the person also said the renter toured / no-showed, then this. " +
+  "Requires ffl-crm POST /api/v1/leasing/conversations/:id/close-lost and a key with scope leasing:write (or *).";
+const CLOSE_LOST_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    reportedBy: {
+      type: "string" as const,
+      description: "The PERSON who decided, e.g. 'Mo Hashem' — the RingCentral sender unless they relayed someone else's decision. Required. Never an agent.",
+    },
+    reason: { type: "string" as const, description: "Their words for why, if given (e.g. \"doesn't really qualify\")." },
+    conversationId: { type: "string" as const, description: "Leasing conversation id, when you have it." },
+    renterName: {
+      type: "string" as const,
+      description: "The renter's name as the person wrote it (e.g. 'allannah', 'Aallannah Johnson'), when you have no id.",
+    },
+  },
+  required: ["reportedBy"],
+  additionalProperties: false,
+};
+
+async function closeLeadLost(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
+  const reportedBy = typeof rawArgs.reportedBy === "string" ? rawArgs.reportedBy.trim() : "";
+  if (!reportedBy) throw new Error("reportedBy is required — the name of the PERSON who decided.");
+  if (/\b(ruckus|agent|assistant|claude|bot)\b/i.test(reportedBy)) {
+    throw new Error("reportedBy must be a person, not an agent. Who decided this lead is lost?");
+  }
+  const reason = typeof rawArgs.reason === "string" ? rawArgs.reason.trim() : "";
+
+  let conversationId = typeof rawArgs.conversationId === "string" ? rawArgs.conversationId.trim() : "";
+  let matchedName: string | null = null;
+
+  if (!conversationId) {
+    const renterName = typeof rawArgs.renterName === "string" ? rawArgs.renterName.trim() : "";
+    if (!renterName) throw new Error("Give conversationId or renterName.");
+    // The list endpoint searches one field at a time, so query on the first
+    // word and let the matcher settle the full name. Closed threads are
+    // included on purpose: an opted-out renter can still be marked lost.
+    const firstWord = renterName.split(/\s+/)[0];
+    const list = await crmRequest<Array<{ id: string; firstName: string | null; lastName: string | null; stage?: string; closed?: boolean }>>(
+      cfg,
+      "GET",
+      "/api/v1/leasing/conversations",
+      { search: firstWord, closed: "true", limit: 50 },
+    );
+    if (!list.success) {
+      throw new Error(`Could not search leasing conversations (HTTP ${list.statusCode}): ${list.error}`);
+    }
+    const rows = Array.isArray(list.data) ? list.data : [];
+    const roster = rows.map((r) => ({
+      conversationId: r.id,
+      name: [r.firstName, r.lastName].filter(Boolean).join(" ") || null,
+      stage: r.stage,
+      closed: r.closed,
+    }));
+    const { match, candidates } = matchUnrecordedTour(renterName, roster);
+    if (!match) {
+      return {
+        ok: false,
+        reason: candidates.length === 0 ? "no_match" : "ambiguous",
+        renterName,
+        candidates: candidates.length > 0 ? candidates : roster,
+        hint:
+          candidates.length === 0
+            ? "No leasing conversation matches that name. Show the person what you found (if anything) and ask which renter they mean."
+            : "More than one conversation matches. Show the candidates (name + stage) and ask which one.",
+      };
+    }
+    conversationId = match.conversationId;
+    matchedName = match.name;
+  }
+
+  const resp = await crmRequest<Record<string, unknown>>(
+    cfg,
+    "POST",
+    `/api/v1/leasing/conversations/${encodeURIComponent(conversationId)}/close-lost`,
+    undefined,
+    { reportedBy, ...(reason ? { reason } : {}) },
+  );
+  if (!resp.success) {
+    throw new Error(
+      `close-lost POST failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires POST /api/v1/leasing/conversations/:id/close-lost (ffl-crm) to be deployed " +
+        "and the Bearer key to have scope leasing:write (or *).",
+    );
+  }
+  return {
+    ...(resp.data as Record<string, unknown>),
+    ...(matchedName ? { matchedName } : {}),
+    source: "native:/api/v1/leasing/conversations/:id/close-lost",
+  };
+}
+
 // --- SMART TOOLS: get_office_closures / set_office_closure ---
 // The lever Ruckus lacked on 2026-09-06 ("we're closed Monday for Labor Day —
 // make sure the leasing agent doesn't book tours"). Cranbrook's AI leasing
@@ -1524,6 +1637,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeLeasingTriageTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_TOOL_NAME);
   const includeLeasingTriageActTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_ACT_TOOL_NAME);
   const includeTourOutcomeTool = !toolFilter || toolFilter.has(TOUR_OUTCOME_TOOL_NAME);
+  const includeCloseLostTool = !toolFilter || toolFilter.has(CLOSE_LOST_TOOL_NAME);
   const includeOfficeClosuresTool = !toolFilter || toolFilter.has(OFFICE_CLOSURES_TOOL_NAME);
   const includeOfficeClosureSetTool = !toolFilter || toolFilter.has(OFFICE_CLOSURE_SET_TOOL_NAME);
   const includeCfLeadsTool = !toolFilter || toolFilter.has(CF_LEADS_TOOL_NAME);
@@ -1591,6 +1705,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeTourOutcomeTool
         ? [{ name: TOUR_OUTCOME_TOOL_NAME, description: TOUR_OUTCOME_TOOL_DESC, inputSchema: TOUR_OUTCOME_TOOL_SCHEMA }]
+        : []),
+      ...(includeCloseLostTool
+        ? [{ name: CLOSE_LOST_TOOL_NAME, description: CLOSE_LOST_TOOL_DESC, inputSchema: CLOSE_LOST_TOOL_SCHEMA }]
         : []),
       ...(includeOfficeClosuresTool
         ? [{ name: OFFICE_CLOSURES_TOOL_NAME, description: OFFICE_CLOSURES_TOOL_DESC, inputSchema: OFFICE_CLOSURES_TOOL_SCHEMA }]
@@ -1854,6 +1971,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${TOUR_OUTCOME_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === CLOSE_LOST_TOOL_NAME) {
+      if (!includeCloseLostTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await closeLeadLost(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${CLOSE_LOST_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

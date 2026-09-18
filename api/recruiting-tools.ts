@@ -1396,6 +1396,9 @@ export async function updateRecruitingState(key: string, value: unknown): Promis
   if (/^(sent_|watchdog_sent_|testgorilla_sent_|videoask_reminder_sent_|videoask_contact_index)/.test(k)) {
     throw new Error(`key "${k}" is reserved for the tools' internal logs/index.`);
   }
+  if (k === "carry_forward") {
+    throw new Error('key "carry_forward" is retired — write carry_forward_cloud (your own unfinished work) or carry_forward_browser (LinkedIn items for the Mac half).');
+  }
   const { value: v, note } = sanitizeRunTimestamp(k, value);
   await crmStateRequest("POST", undefined, { agentKey: AGENT_STATE_KEY, key: k, value: v });
   return { saved: true, agentKey: AGENT_STATE_KEY, key: k, ...(note ? { note, value: v } : {}) };

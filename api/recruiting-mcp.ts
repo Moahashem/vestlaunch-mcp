@@ -318,8 +318,10 @@ const TOOLS: ToolDef[] = [
     name: "update_recruiting_state",
     description:
       "Upsert one key in the shared recruiting-sweep state. Use at the end of every run (e.g. key " +
-      "'last_run_cloud' = ISO timestamp; key 'carry_forward' = array). Keys prefixed sent_/" +
-      "watchdog_sent_ and the dedup index are reserved. Args: { key, value (any JSON) }.",
+      "'last_run_cloud' = ISO timestamp; key 'carry_forward_cloud' = array of your own unfinished " +
+      "work; key 'carry_forward_browser' = array of LinkedIn items for the Mac half, written only " +
+      "when you have some). Keys prefixed sent_/watchdog_sent_ and the dedup index are reserved, " +
+      "and the old shared 'carry_forward' key is retired. Args: { key, value (any JSON) }.",
     inputSchema: {
       type: "object",
       properties: {

@@ -1871,6 +1871,76 @@ function reminderWindowDays(): number {
 }
 const REMINDER_SCAN_CAP = 60;
 
+/**
+ * Is there a live human conversation with this candidate? If so the nudge
+ * tool must refuse — Mo's 2026-09-09 ruling, tightened 2026-09-21 after the
+ * Monica Reyna incident (see the call site).
+ *
+ * Live means EITHER:
+ *  - any message FROM the candidate in the lookback window (no "since the
+ *    invite" cut-off any more — that cut-off is what let Mo's own in-thread
+ *    reply masquerade as a newer invite), OR
+ *  - any message in Sent TO the candidate that is not one of our three
+ *    automated templates verbatim: a "Re:"/"Fwd:" of anything, or any other
+ *    subject, is a human writing to them by hand.
+ *
+ * Pure function over message metadata — exported for tests.
+ */
+export function liveConversationReason(
+  displayName: string,
+  repliesFromCandidate: Array<{ subject: string; receivedAt: string; snippet: string }>,
+  sentToCandidate: Array<{ subject: string; receivedAt: string; snippet: string }>,
+): SendResult | null {
+  const newest = <T extends { receivedAt: string }>(xs: T[]): T | undefined =>
+    [...xs].sort((a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt))[0];
+  const reply = newest(repliesFromCandidate);
+  const human = newest(sentToCandidate.filter((m) => !isAutomatedTemplateSubject(m.subject)));
+  // Mo answered AFTER their last reply → the ball is in the candidate's court.
+  // Refuse the nudge, but this is NOT an "email reply waiting" for Mo.
+  if (reply && human && Date.parse(human.receivedAt) > Date.parse(reply.receivedAt)) {
+    return {
+      sent: false,
+      reason:
+        `${displayName} wrote back (${reply.receivedAt}) and Mo has ALREADY ANSWERED by hand ` +
+        `(${human.receivedAt}: "${(human.subject ?? "").slice(0, 100)}"). Live human conversation — ` +
+        "no automated nudge, and nothing for NEEDS YOU: Mo is waiting on them, not the other way round.",
+      evidence: [
+        { subject: reply.subject, at: reply.receivedAt, snippet: reply.snippet.slice(0, 200) },
+        { subject: human.subject, at: human.receivedAt, snippet: human.snippet.slice(0, 200) },
+      ],
+    };
+  }
+  if (reply) {
+    return {
+      sent: false,
+      reason:
+        `${displayName} already WROTE BACK (${reply.receivedAt}: "${reply.snippet.slice(0, 120)}"). ` +
+        "A replier is a live conversation — no automated nudge, ever, regardless of anything we sent since. " +
+        "If their reply is unanswered, list them under NEEDS YOU as an email reply waiting for Mo.",
+      evidence: [{ subject: reply.subject, at: reply.receivedAt, snippet: reply.snippet.slice(0, 200) }],
+    };
+  }
+  if (human) {
+    return {
+      sent: false,
+      reason:
+        `Mo already wrote to ${displayName} by hand (${human.receivedAt}: "${(human.subject ?? "").slice(0, 100)}"). ` +
+        "A human is in this conversation — no automated nudge. Nothing for NEEDS YOU; Mo has it.",
+      evidence: [{ subject: human.subject, at: human.receivedAt, snippet: human.snippet.slice(0, 200) }],
+    };
+  }
+  return null;
+}
+
+/** Exactly our own templates, as sent. A "Re:" in front means a human replied in-thread. */
+export function isAutomatedTemplateSubject(subject: string | undefined): boolean {
+  const s = (subject ?? "").trim();
+  if (/^(re|fwd?|aw|wg)\s*:/i.test(s)) return false;
+  if (s === REMINDER_SUBJECT) return true;
+  if (s === TESTGORILLA_SUBJECT) return true;
+  return s.startsWith(INVITE_SUBJECT_MARKER);
+}
+
 function reminderCap(): number {
   const n = Number.parseInt(env("VIDEOASK_REMINDER_DAILY_CAP"), 10);
   return Number.isFinite(n) && n > 0 ? n : REMINDER_DEFAULT_CAP;
@@ -2225,23 +2295,28 @@ export async function sendVideoaskReminder(args: {
   //     before the nudge pass would have pinged her again). Enforced here now.
   //     Best-effort: a Gmail hiccup must not block the whole pass, and the
   //     agent-side cross-check still applies.
+  //
+  //     2026-09-21 (Monica Reyna): the guard used to count only replies newer
+  //     than the NEWEST "Next step for the" mail in Sent. Mo answered her on
+  //     9/19 inside the original thread — subject "Re: Next step for the…" —
+  //     so his own reply registered as a fresh invite, her 9/12 reply became
+  //     "older than the invite", and the tool nudged her on 9/20, fourteen
+  //     hours after his "last one from me, I promise." Now: ANY reply from the
+  //     candidate in the window is a live conversation, and so is ANY email in
+  //     Sent to them that is not one of our three templates (a hand-written
+  //     mail from Mo, or a "Re:" of anything). See liveConversationReason().
   try {
-    const sinceInvite = Date.parse(inviteMatches[0]?.receivedAt ?? "");
     const replies = await gmailSearchMessages(`from:${email} newer_than:${reminderWindowDays() + 7}d`, 3);
-    const reply = replies.find((m) => {
-      const t = Date.parse(m.receivedAt);
-      return Number.isNaN(sinceInvite) || Number.isNaN(t) || t >= sinceInvite;
-    });
-    if (reply) {
-      return {
-        sent: false,
-        reason:
-          `${first}${last ? ` ${last}` : ""} already WROTE BACK (${reply.receivedAt}: "${reply.snippet.slice(0, 120)}"). ` +
-          "A replier is a live conversation — no automated nudge. If their reply is unanswered, list them " +
-          "under NEEDS YOU as an email reply waiting for Mo.",
-        evidence: [{ subject: reply.subject, at: reply.receivedAt, snippet: reply.snippet.slice(0, 200) }],
-      };
-    }
+    const sentToThem = await gmailSearchMessages(
+      `in:sent to:${email} newer_than:${reminderWindowDays() + 7}d`,
+      10,
+    );
+    const live = liveConversationReason(
+      `${first}${last ? ` ${last}` : ""}`,
+      replies,
+      sentToThem,
+    );
+    if (live) return live;
   } catch {
     // fall through — the engagement check below still runs fail-closed
   }

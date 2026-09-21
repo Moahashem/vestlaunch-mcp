@@ -1467,6 +1467,18 @@ async function writeStateKey(key: string, value: unknown): Promise<void> {
 
 // ───────────────────────── send_recruiting_invite ─────────────────────────
 
+/**
+ * Mo, 2026-09-21: the links work. Every "the link expired / doesn't open"
+ * reply so far has been a candidate pasting part of the URL or not opening
+ * it in a browser. So every template now spells the address out in plain
+ * words right under the link, in a form that survives any mail client's link
+ * rewriting. Exported for tests.
+ */
+export function typeItInLine(link: string): string {
+  const bare = link.replace(/^https?:\/\/(www\.)?/i, "").replace(/\/+$/, "");
+  return `If the link doesn't open, type ${bare} directly into your browser's address bar.`;
+}
+
 const INVITE_TEMPLATE = (first: string, roleDisplay: string, link: string, personalNote?: string) =>
   [
     `Hi ${first},`,
@@ -1478,6 +1490,8 @@ const INVITE_TEMPLATE = (first: string, roleDisplay: string, link: string, perso
     "We'd love to move you forward. The next step is a quick video questionnaire — just a few questions, about 5 minutes:",
     "",
     link,
+    "",
+    typeItInLine(link),
     "",
     "Completing it moves you to the front of our list. If you've already filled it out, please feel free to disregard this email.",
     "",
@@ -1724,6 +1738,8 @@ const TESTGORILLA_TEMPLATE = (first: string | null, roleDisplay?: string) =>
     "",
     `Please complete it here: ${testgorillaLink()}`,
     "",
+    typeItInLine(testgorillaLink()),
+    "",
     "Once you've finished, we'll review your results and follow up on next steps. We're excited to learn more about you!",
     "",
     "Mo",
@@ -1960,6 +1976,8 @@ const REMINDER_TEMPLATE = (first: string, roleDisplay: string, link: string) =>
     "It takes about 5 minutes, and it is the step that moves your application forward:",
     "",
     link,
+    "",
+    typeItInLine(link),
     "",
     "If you have already completed it, thank you - please ignore this. And if you are no longer interested, no problem at all; you can ignore this too and we will close out your application.",
     "",

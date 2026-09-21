@@ -78,7 +78,10 @@ const TOOLS: ToolDef[] = [
       "List people who completed the VideoAsk screening question since a given time. Returns ONLY " +
       "[{name, email, completed_at}] — transcripts are stripped server-side. Args: " +
       "{ since_iso (required, ISO timestamp), question_id (optional — defaults to the Virtual PM " +
-      "screening question) }.",
+      "screening question) }. VIRTUAL PM ONLY (Mo, 2026-09-21): the skills-assessment stage covers that one " +
+      "questionnaire; any other question_id is refused. Completers of the Assistant Community Manager, Leasing " +
+      "Agent, Community Manager, Sales or Executive Assistant questionnaires are Mo's manual review pipeline — " +
+      "never list them, never call them uncontactable.",
     inputSchema: {
       type: "object",
       properties: {

@@ -619,6 +619,36 @@ export interface Completer {
 }
 
 /**
+ * Mo's ruling, 2026-09-21: the automated skills-assessment stage is for the
+ * Virtual PM questionnaire ONLY. Every other questionnaire (Assistant Community
+ * Manager, Leasing Agent, Community/Regional Manager, Sales, Executive
+ * Assistant) is his manual pipeline — he reviews the video, invites the ones he
+ * likes to a video call, and sends the TestGorilla link himself afterwards.
+ *
+ * Why this is enforced here and not just in the prompt: on 9/20 and 9/21 the
+ * sweep flagged three ACM completers as "waiting for the skills assessment"
+ * and "uncontactable" — neither was true (all three had addresses on file in
+ * VideoAsk), and the chore landed on Mo two mornings running. A completer of
+ * any other form is not in this stage's universe at all, so the tool refuses
+ * to page any other question. Exported for tests.
+ */
+export const TESTGORILLA_QUESTION_IDS: ReadonlySet<string> = new Set([VIDEOASK_DEFAULT_QUESTION_ID]);
+
+export function assertTestgorillaQuestion(questionId: string | undefined): string {
+  const qid = (questionId ?? "").trim() || VIDEOASK_DEFAULT_QUESTION_ID;
+  if (!TESTGORILLA_QUESTION_IDS.has(qid)) {
+    throw new Error(
+      `question_id ${qid} is not in the skills-assessment stage. Mo's rule (2026-09-21): the automated ` +
+        "TestGorilla stage covers the Virtual PM questionnaire ONLY. Completers of every other questionnaire " +
+        "(Assistant Community Manager, Leasing Agent, Community Manager, Sales, Executive Assistant) are Mo's " +
+        "manual review pipeline — they are not waiting on anything from this sweep and are never a NEEDS YOU item. " +
+        "Call this tool without question_id.",
+    );
+  }
+  return qid;
+}
+
+/**
  * get_videoask_completers — pages the answers endpoint newest-first and STRIPS
  * each ~5k-token record down to {name, email, completed_at} server-side.
  * (Payload key verified live 2026-08-18: {next, previous, results:[records]}.)
@@ -627,7 +657,7 @@ export async function getVideoaskCompleters(
   questionId: string | undefined,
   sinceIso: string,
 ): Promise<{ completers: Completer[]; pages_fetched: number; truncated: boolean }> {
-  const qid = (questionId ?? "").trim() || VIDEOASK_DEFAULT_QUESTION_ID;
+  const qid = assertTestgorillaQuestion(questionId);
   const since = Date.parse(sinceIso);
   if (Number.isNaN(since)) throw new Error(`since_iso is not a valid date: ${sinceIso}`);
 

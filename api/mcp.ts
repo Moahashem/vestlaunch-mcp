@@ -892,6 +892,55 @@ async function getFflOnboarding(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-onboarding" };
 }
 
+// --- SMART TOOL: get_ffl_churn_risk ---
+// Thin-agent / smart-tools (D13). Churn Radar: every owner scored 0-100 for churn risk,
+// ranked by risk x revenue, with plain-English reasons. All joins (AppFolio directory +
+// rent roll, onboarding stalls, open work orders, CRM fees/refunds) and scoring happen
+// server-side in ffl-crm. Reads /api/v1/analytics/ffl-churn-risk. READ-ONLY.
+const FFL_CHURN_TOOL_NAME = "get_ffl_churn_risk";
+const FFL_CHURN_TOOL_DESC =
+  "Churn Radar smart tool: returns FFL landlord owners ranked by churn risk x revenue, scored " +
+  "server-side (0-100, higher = more likely to cancel; tiers red >=70, orange 45-69, yellow 25-44, " +
+  "green <25). Returns { as_of, fresh, counts, mrr_at_risk_cents, mrr_estimated, portfolio, owners, " +
+  "recent_losses, sources, method, scoreboard_url }. Each owner: { owner, score, tier, trend_7d, doors, " +
+  "addresses, monthly_fee_cents, tenure_days, override, reasons (plain-English, strongest first), " +
+  "pillars {financial, leasing, onboarding, service, engagement, relationship} (null = no data yet, " +
+  "NOT healthy), opportunity_id }. Reads the board the hourly cron keeps fresh; refresh=true re-scores " +
+  "now (slow, ~30s, 4 AppFolio calls - use only when asked for live numbers). Filter with tier " +
+  "(e.g. 'red' or 'red,orange') and limit (default 25). IMPORTANT: if sources.*_ok is false, that " +
+  "signal was left out - say so rather than calling owners healthy. " +
+  "Source = /api/v1/analytics/ffl-churn-risk. Read-only.";
+const FFL_CHURN_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    tier: { type: "string", description: "Optional tier filter: red | orange | yellow | green, or a comma list like 'red,orange'." },
+    limit: { type: "integer", minimum: 1, maximum: 500, description: "Max owners to return (default 25)." },
+    refresh: { type: "boolean", description: "Re-score now instead of reading the saved board (slow). Default false." },
+  },
+  additionalProperties: false,
+};
+
+async function getFflChurnRisk(cfg: Cfg, args: { tier?: string; limit?: number; refresh?: boolean }): Promise<unknown> {
+  const q = new URLSearchParams();
+  if (args.tier) q.set("tier", String(args.tier));
+  if (args.limit) q.set("limit", String(args.limit));
+  if (args.refresh) q.set("refresh", "1");
+  const qs = q.toString();
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", `/api/v1/analytics/ffl-churn-risk${qs ? `?${qs}` : ""}`);
+  if (!resp.success) {
+    throw new Error(
+      `ffl-churn-risk endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "This tool requires GET /api/v1/analytics/ffl-churn-risk (ffl-crm Churn Radar PR) to be deployed " +
+        "and the Bearer key to have scope properties:read (or *).",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || !Array.isArray((d as Record<string, unknown>).owners)) {
+    throw new Error("ffl-churn-risk endpoint returned an unexpected shape (no owners array).");
+  }
+  return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-churn-risk" };
+}
+
 // --- SMART TOOL: get_ffl_leasing ---
 // Thin-agent / smart-tools (D13). Returns FFL "Apps & Leases" metrics (Company Numbers
 // row 23, A23-E23) computed server-side. Leases-signed (C23/D23/E23) come from AppFolio
@@ -1631,6 +1680,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
   const includeFflOnboardingTool = !toolFilter || toolFilter.has(FFL_ONBOARDING_TOOL_NAME);
+  const includeFflChurnTool = !toolFilter || toolFilter.has(FFL_CHURN_TOOL_NAME);
   const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
   const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
   const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
@@ -1687,6 +1737,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflOnboardingTool
         ? [{ name: FFL_ONBOARDING_TOOL_NAME, description: FFL_ONBOARDING_TOOL_DESC, inputSchema: FFL_ONBOARDING_TOOL_SCHEMA }]
+        : []),
+      ...(includeFflChurnTool
+        ? [{ name: FFL_CHURN_TOOL_NAME, description: FFL_CHURN_TOOL_DESC, inputSchema: FFL_CHURN_TOOL_SCHEMA }]
         : []),
       ...(includeFflLeasingTool
         ? [{ name: FFL_LEASING_TOOL_NAME, description: FFL_LEASING_TOOL_DESC, inputSchema: FFL_LEASING_TOOL_SCHEMA }]
@@ -1852,6 +1905,24 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_DEL_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === FFL_CHURN_TOOL_NAME) {
+      if (!includeFflChurnTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const a = (rawArgs ?? {}) as { tier?: string; limit?: number; refresh?: boolean };
+        const result = await getFflChurnRisk(cfg, a);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${FFL_CHURN_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

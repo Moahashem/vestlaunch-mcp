@@ -901,8 +901,10 @@ const FFL_CHURN_TOOL_NAME = "get_ffl_churn_risk";
 const FFL_CHURN_TOOL_DESC =
   "Churn Radar smart tool: returns FFL landlord owners ranked by churn risk x revenue, scored " +
   "server-side (0-100, higher = more likely to cancel; tiers red >=70, orange 45-69, yellow 25-44, " +
-  "green <25). Returns { as_of, fresh, counts, mrr_at_risk_cents, mrr_estimated, portfolio, owners, " +
-  "recent_losses, sources, method, scoreboard_url }. Each owner: { owner, score, tier, trend_7d, doors, " +
+  "green <25; owners who already gave notice score 100 with leaving=true). Returns { as_of, fresh, counts, leaving, " +
+  "mrr_cents, mrr_at_risk_cents, mrr_estimated, portfolio, owners, " +
+  "recent_losses (kind churn | listing_only), sources, method, scoreboard_url }. Each owner: { owner, score, tier, " +
+  "leaving, last_contact_at, trend_7d, doors, " +
   "addresses, monthly_fee_cents, tenure_days, override, reasons (plain-English, strongest first), " +
   "pillars {financial, leasing, onboarding, service, engagement, relationship} (null = no data yet, " +
   "NOT healthy), opportunity_id }. Reads the board the hourly cron keeps fresh; refresh=true re-scores " +

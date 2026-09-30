@@ -750,6 +750,61 @@ async function getFflDelinquency(cfg: Cfg, rawArgs: Record<string, unknown>): Pr
   };
 }
 
+// --- SMART TOOL: get_delinquency_worklist ---
+// FFL Delinquency Agent (company-hq projects/tech/ffl-2026-delinquency-agent), Phase 1
+// read-only. Wraps the native endpoint /api/v1/analytics/ffl-delinquency-worklist
+// (ffl-crm PR #1593): every late unit across AppFolio + ResMan (Cranbrook) with state,
+// stage, late-day, fee eligibility, notice rule/gate and the ladder steps due TODAY
+// with owner (agent = templated send, human = call / notice / decision). The agent never
+// counts days or reads a statute — the rules live in ffl-crm src/lib/delinquency/rules.ts.
+const DEL_WORKLIST_TOOL_NAME = "get_delinquency_worklist";
+const DEL_WORKLIST_TOOL_DESC =
+  "FFL Delinquency Agent smart tool (Phase 1, READ-ONLY). Returns every late unit across " +
+  "AppFolio (single-family, dummies excluded) + ResMan (Cranbrook Forest) as computed rows: " +
+  "{ unit_id, portfolio, property, unit, state, tenant, balance, current_period_balance, " +
+  "days_past_due, stage (grace|late_rent|notice_pending|notice_served|eviction_ready|frozen|" +
+  "carried_balance|needs_human|resolved), late_day, fee_eligible(+from), steps_due_today " +
+  "[{type, template_id, owner: agent|human}], notice {required_type, min_days, methods, " +
+  "preconditions_met, blocked_reason, served_at, clock_ends}, flags } plus a summary " +
+  "(by_state, by_stage, agent vs human steps, blocked notices, cares_unknown). State rules " +
+  "TX/VA/MD/DC (GA parked) are DRAFT — not attorney-reviewed. Agent rule: act only on steps " +
+  "with owner=agent and only from approved templates; every owner=human step becomes a task " +
+  "for Zulema; NEVER send anything about eviction/court/notices yourself. Pass rows=false for " +
+  "the summary only (Ruckus post). Source = /api/v1/analytics/ffl-delinquency-worklist.";
+const DEL_WORKLIST_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    date: {
+      type: "string" as const,
+      description: "Optional YYYY-MM-DD (America/Chicago) to evaluate as-of; default today. For validation runs.",
+    },
+    rows: {
+      type: "boolean" as const,
+      description: "Default true. false = summary only (small; for the daily Ruckus post).",
+    },
+  },
+  additionalProperties: false,
+};
+
+async function getDelinquencyWorklist(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
+  const qs = new URLSearchParams();
+  if (typeof rawArgs.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawArgs.date)) qs.set("date", rawArgs.date);
+  if (rawArgs.rows === false) qs.set("rows", "0");
+  const path = "/api/v1/analytics/ffl-delinquency-worklist" + (qs.toString() ? `?${qs}` : "");
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", path);
+  if (!resp.success) {
+    throw new Error(
+      `ffl-delinquency-worklist endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "Requires GET /api/v1/analytics/ffl-delinquency-worklist (ffl-crm PR #1593) deployed and a key with properties:read.",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || !("summary" in d)) {
+    throw new Error("ffl-delinquency-worklist endpoint returned an unexpected shape (no summary).");
+  }
+  return { ...d, source: "native:/api/v1/analytics/ffl-delinquency-worklist" };
+}
+
 // --- SMART TOOL: report_run_complete ---
 // Completion marker for the daily-cron spend guard (workforce-hub.ts v2,
 // 2026-08-31). A daily Managed Agent calls this ONCE, as its LAST action, after
@@ -1680,6 +1735,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeFflGuestCardTool = !toolFilter || toolFilter.has(FFL_GUESTCARD_TOOL_NAME);
   const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
   const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
+  const includeDelWorklistTool = !toolFilter || toolFilter.has(DEL_WORKLIST_TOOL_NAME);
   const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
   const includeFflOnboardingTool = !toolFilter || toolFilter.has(FFL_ONBOARDING_TOOL_NAME);
   const includeFflChurnTool = !toolFilter || toolFilter.has(FFL_CHURN_TOOL_NAME);
@@ -1733,6 +1789,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeFflDelTool
         ? [{ name: FFL_DEL_TOOL_NAME, description: FFL_DEL_TOOL_DESC, inputSchema: FFL_DEL_TOOL_SCHEMA }]
+        : []),
+      ...(includeDelWorklistTool
+        ? [{ name: DEL_WORKLIST_TOOL_NAME, description: DEL_WORKLIST_TOOL_DESC, inputSchema: DEL_WORKLIST_TOOL_SCHEMA }]
         : []),
       ...(includeFflHomesTool
         ? [{ name: FFL_HOMES_TOOL_NAME, description: FFL_HOMES_TOOL_DESC, inputSchema: FFL_HOMES_TOOL_SCHEMA }]
@@ -1890,6 +1949,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_REN_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === DEL_WORKLIST_TOOL_NAME) {
+      if (!includeDelWorklistTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getDelinquencyWorklist(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${DEL_WORKLIST_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

@@ -167,6 +167,14 @@
     {
       "path": "/api/cron/fleet-staleness",
       "schedule": "10 13 * * *"
+    },
+    {
+      "path": "/api/cron/daily-delinquency",
+      "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/cron/daily-delinquency",
+      "schedule": "30 12 * * *"
     }
   ]
 }

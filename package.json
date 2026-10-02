@@ -40,7 +40,7 @@
   },
   "homepage": "https://github.com/Moahashem/vestlaunch-mcp#readme",
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

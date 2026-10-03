@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { shouldSkipRedundantKickoff } from "../../api/workforce-hub";
 import { isFinishedSweepRow } from "../../api/cron/recruiting-sweep";
-import { sanitizeRunTimestamp } from "../../api/recruiting-tools";
+import { sanitizeRunTimestamp, updateRecruitingState } from "../../api/recruiting-tools";
 
 const HUB_KEY = "ffl_live_test_key";
 /** The 13:50 UTC retry slot — inside the default heal window. */
@@ -115,6 +115,22 @@ describe("sanitizeRunTimestamp", () => {
     expect(() => sanitizeRunTimestamp("last_run_cloud", 12345)).toThrow(/ISO-8601/);
   });
   it("leaves every other key alone", () => {
-    expect(sanitizeRunTimestamp("carry_forward", ["x"])).toEqual({ value: ["x"] });
+    expect(sanitizeRunTimestamp("carry_forward_cloud", ["x"])).toEqual({ value: ["x"] });
+  });
+});
+
+describe("updateRecruitingState rejects the retired shared key", () => {
+  it("refuses carry_forward and names both replacements", async () => {
+    await expect(updateRecruitingState("carry_forward", ["x"])).rejects.toThrow(
+      /carry_forward_cloud.*carry_forward_browser/,
+    );
+  });
+  it("still accepts the split keys", async () => {
+    // Reaches the network call, which is proof the guard let it through.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 })));
+    vi.stubEnv("FFL_WORKFORCE_API_KEY", HUB_KEY);
+    await expect(updateRecruitingState("carry_forward_browser", ["linkedin item"])).resolves.toMatchObject({ saved: true });
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 });

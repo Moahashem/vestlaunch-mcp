@@ -8,9 +8,13 @@
  * Cranbrook workspace, RUCKUS_CRANBROOK_API_KEY, held only in this server's env
  * and used only here — the other agents on the shared MCP never see it.
  *
- * Read-only by construction: only the GET tools named below are exposed, each
- * as `cranbrook_<name>`, and every call is a GET. The tool list comes from the
- * CRM manifest (/api/v1/me) so paths and parameters never drift.
+ * Mo (2026-10-03, later): full read AND write — "can't we make it read and
+ * write?". Every CRM tool the key's scopes allow is exposed as
+ * `cranbrook_<name>`, except deletes and account administration (API keys,
+ * webhooks, workspaces). The tool list comes from the CRM manifest
+ * (/api/v1/me) so paths and parameters never drift. Texts and emails to
+ * renters go out from the leasing line inside the renter's thread — the CRM
+ * routes a Cranbrook key's sends there, with opt-outs and quiet hours.
  *
  * Which chat hears what is NOT decided here: the CRM send path holds any
  * Cranbrook post to Sam's sales chat (ffl-crm lib/rc-chat-policy).
@@ -18,26 +22,18 @@
 
 const PREFIX = "cranbrook_";
 
-/** CRM read tools Ruckus may use on Cranbrook. GET only. */
-export const CRANBROOK_READ_TOOLS = new Set([
-  "search",
-  "list_contacts",
-  "get_contact",
-  "get_contact_activity",
-  "list_opportunities",
-  "get_opportunity",
-  "list_tasks",
-  "get_task",
-  "get_activities",
-  "get_pipelines",
-  "list_bookings",
-  "get_contact_analytics",
-]);
+/** Never exposed: deletes, and account administration. */
+export function isExcludedTool(t: { method: string; scope?: string; name: string }): boolean {
+  if (t.method === "DELETE") return true;
+  const scope = t.scope ?? "";
+  return scope.startsWith("admin:") || scope.startsWith("webhooks:") || scope === "workspaces:write" || (/api_key|webhook|workspace/.test(t.name) && t.method !== "GET");
+}
 
 interface ManifestTool {
   name: string;
   method: string;
   path: string;
+  scope?: string;
   description: string;
   inputSchema?: { properties?: Record<string, unknown>; required?: string[] };
 }
@@ -47,6 +43,7 @@ export interface CranbrookTool {
   description: string;
   inputSchema: { type: "object"; properties: Record<string, unknown>; required?: string[]; additionalProperties: boolean };
   path: string;
+  method: string;
 }
 
 function baseUrl(): string {
@@ -58,18 +55,22 @@ export function cranbrookKey(): string {
   return (process.env.RUCKUS_CRANBROOK_API_KEY ?? "").trim();
 }
 
-async function crmGet(path: string, query: Record<string, unknown>, key: string): Promise<unknown> {
+async function crmCall(method: string, path: string, args: Record<string, unknown>, key: string): Promise<unknown> {
   const url = new URL(`${baseUrl()}${path}`);
-  for (const [k, v] of Object.entries(query)) {
-    if (v === undefined || v === null || v === "") continue;
-    // The key decides the business; a caller can't point it elsewhere.
-    if (k === "workspace_id" || k === "workspaceId") continue;
-    url.searchParams.set(k, String(v));
+  // The key decides the business; a caller can't point it elsewhere.
+  const clean = Object.fromEntries(Object.entries(args).filter(([k, v]) => k !== "workspace_id" && k !== "workspaceId" && v !== undefined));
+  const isGet = method === "GET";
+  if (isGet) {
+    for (const [k, v] of Object.entries(clean)) {
+      if (v === null || v === "") continue;
+      url.searchParams.set(k, String(v));
+    }
   }
   const t = Number.parseInt(process.env.VESTLAUNCH_TIMEOUT_MS ?? "", 10);
   const res = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${key}`, "User-Agent": "ruckus-mcp-cranbrook/0.1.0" },
+    method,
+    headers: { Authorization: `Bearer ${key}`, "User-Agent": "ruckus-mcp-cranbrook/0.2.0", ...(isGet ? {} : { "Content-Type": "application/json" }) },
+    body: isGet ? undefined : JSON.stringify(clean),
     signal: AbortSignal.timeout(Number.isFinite(t) && t > 0 ? t : 30_000),
   });
   const text = await res.text();
@@ -90,7 +91,7 @@ export async function loadCranbrookTools(): Promise<CranbrookTool[]> {
   const key = cranbrookKey();
   if (!key) return [];
   try {
-    const me = (await crmGet("/api/v1/me", {}, key)) as { data?: { capabilities?: ManifestTool[] } } | null;
+    const me = (await crmCall("GET", "/api/v1/me", {}, key)) as { data?: { capabilities?: ManifestTool[] } } | null;
     const caps = me?.data?.capabilities ?? [];
     return buildCranbrookTools(caps);
   } catch {
@@ -98,11 +99,11 @@ export async function loadCranbrookTools(): Promise<CranbrookTool[]> {
   }
 }
 
-/** Pure: manifest → cranbrook_* tools (GET + allowlisted only). */
+/** Pure: manifest → cranbrook_* tools (everything but deletes and administration). */
 export function buildCranbrookTools(caps: ManifestTool[]): CranbrookTool[] {
   const out: CranbrookTool[] = [];
   for (const t of caps) {
-    if (!t || t.method !== "GET" || !CRANBROOK_READ_TOOLS.has(t.name)) continue;
+    if (!t || !["GET", "POST", "PATCH", "PUT"].includes(t.method) || isExcludedTool(t)) continue;
     const properties: Record<string, unknown> = { ...(t.inputSchema?.properties ?? {}) };
     delete properties.workspace_id;
     delete properties.workspaceId;
@@ -113,19 +114,20 @@ export function buildCranbrookTools(caps: ManifestTool[]): CranbrookTool[] {
     }
     out.push({
       name: `${PREFIX}${t.name}`,
-      description: `CRANBROOK FOREST (the apartment business, separate from FFL) — ${t.description} Read-only. Cranbrook information may be posted only in your main channel (Mo + Yuliana), never in Sam's sales chat.`,
+      description: `${t.method === "GET" ? "" : "[WRITE] "}CRANBROOK FOREST (the apartment business, separate from FFL) — ${t.description}${t.method === "GET" ? "" : " This changes Cranbrook records for real; do it only when Mo or Yuliana asked. Texts and emails go to the renter from the leasing line, inside their thread."} Cranbrook information may be posted only in your main channel (Mo + Yuliana), never in Sam's sales chat.`,
       inputSchema: { type: "object", properties, required: required.size ? [...required] : undefined, additionalProperties: false },
       path: t.path,
+      method: t.method,
     });
   }
   return out;
 }
 
 export function isCranbrookTool(name: string): boolean {
-  return name.startsWith(PREFIX) && CRANBROOK_READ_TOOLS.has(name.slice(PREFIX.length));
+  return name.startsWith(PREFIX) && name.length > PREFIX.length;
 }
 
-/** Run one cranbrook_* tool. Always a GET with the Cranbrook-bound key. */
+/** Run one cranbrook_* tool with the Cranbrook-bound key. */
 export async function runCranbrookTool(tool: CranbrookTool, args: Record<string, unknown>): Promise<unknown> {
   const key = cranbrookKey();
   if (!key) return { ok: false, error: "Cranbrook access is not configured (RUCKUS_CRANBROOK_API_KEY)." };
@@ -136,5 +138,5 @@ export async function runCranbrookTool(tool: CranbrookTool, args: Record<string,
     if (typeof v !== "string" || !v) throw new Error(`Missing required path parameter: ${p}`);
     return encodeURIComponent(v);
   });
-  return crmGet(path, rest, key);
+  return crmCall(tool.method, path, rest, key);
 }

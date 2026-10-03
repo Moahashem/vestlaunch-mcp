@@ -53,22 +53,38 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
+import { isCranbrookTool, loadCranbrookTools, runCranbrookTool, type CranbrookTool } from "./_ruckus-cranbrook";
+
 export const config = { maxDuration: 60 };
 
 const TOOL_NAME = "ruckus_send";
 const TOOL_DESC =
-  "Post a message into Ruckus's own RingCentral channel — this is Ruckus's reply " +
-  "path as FFL Chief of Staff. Calls ffl-crm POST /api/ringcentral/ruckus-send, which " +
-  "posts as the Ruckus bot. Your text is NOT auto-delivered: you MUST call this tool to " +
-  "be heard, whether replying to a person or posting your morning brief. Args: { text } " +
-  "(required); optional { chatId } overrides the default channel. Returns { ok, chatId }.";
+  "Post a message into a RingCentral chat as Ruckus — this is Ruckus's reply path as " +
+  "Chief of Staff. Calls ffl-crm POST /api/ringcentral/ruckus-send, which posts as the " +
+  "Ruckus bot. Your text is NOT auto-delivered: you MUST call this tool to be heard, " +
+  "whether replying to a person or posting your morning brief. Args: { text } (required); " +
+  "{ business }: what the post is about — 'ffl', 'cranbrook' or 'both'; " +
+  "{ chat }: 'main' (default — the Mo + Yuliana chat, both businesses) or 'sales' (the " +
+  "Mo + Sam chat, FFL SALES ONLY — never anything about Cranbrook). Which chat hears " +
+  "what is enforced by the CRM: a post a chat may not hear comes back { held: true } " +
+  "and is not delivered; Mo is told. Returns { ok, chatId } or { ok:false, held, reasons }.";
 const TOOL_SCHEMA = {
   type: "object" as const,
   properties: {
     text: { type: "string", description: "The message text to post into Ruckus's channel." },
+    business: {
+      type: "string",
+      enum: ["ffl", "cranbrook", "both"],
+      description: "What the post is about: 'ffl', 'cranbrook', or 'both'.",
+    },
+    chat: {
+      type: "string",
+      enum: ["main", "sales"],
+      description: "'main' (default): the Mo + Yuliana chat, FFL and Cranbrook. 'sales': the Mo + Sam chat, FFL sales only.",
+    },
     chatId: {
       type: "string",
-      description: "Optional RingCentral chat id to override the default Ruckus channel.",
+      description: "Raw RingCentral chat id (rarely needed). The same chat rules apply.",
     },
   },
   required: ["text"],
@@ -949,6 +965,8 @@ async function ruckusSend(args: Record<string, unknown>, forwardToken?: string):
 
   const body: Record<string, unknown> = { text };
   if (typeof args.chatId === "string" && args.chatId.trim()) body.chatId = args.chatId.trim();
+  if (typeof args.chat === "string" && args.chat.trim()) body.chat = args.chat.trim();
+  if (args.business !== undefined) body.business = args.business;
 
   const t = Number.parseInt(process.env.VESTLAUNCH_TIMEOUT_MS ?? "", 10);
   const timeoutMs = Number.isFinite(t) && t > 0 ? t : 30_000;
@@ -987,8 +1005,13 @@ function buildServer(forwardToken?: string): Server {
     { capabilities: { tools: {} } },
   );
 
+  // Cranbrook read tools (Mo, 2026-10-03): loaded once per server instance.
+  let cranbrookTools: Promise<CranbrookTool[]> | null = null;
+  const cranbrook = () => (cranbrookTools ??= loadCranbrookTools());
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      ...(await cranbrook()).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
       { name: TOOL_NAME, description: TOOL_DESC, inputSchema: TOOL_SCHEMA },
       { name: RERUN_TOOL_NAME, description: RERUN_TOOL_DESC, inputSchema: RERUN_TOOL_SCHEMA },
       { name: DIAGNOSE_TOOL_NAME, description: DIAGNOSE_TOOL_DESC, inputSchema: DIAGNOSE_TOOL_SCHEMA },
@@ -999,6 +1022,22 @@ function buildServer(forwardToken?: string): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: rawArgs } = req.params;
+    if (isCranbrookTool(name)) {
+      // REAL GATE, like the rerun tool: the bearer must be Ruckus's vault
+      // credential (= RUCKUS_SEND_TOKEN). This server is otherwise a thin relay.
+      const expected = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+      if (!expected || (forwardToken ?? "").trim() !== expected) {
+        return { content: [{ type: "text", text: "Unauthorized for Cranbrook reads." }], isError: true };
+      }
+      try {
+        const tool = (await cranbrook()).find((t) => t.name === name);
+        if (!tool) return { content: [{ type: "text", text: `Cranbrook tool not available: ${name}` }], isError: true };
+        const result = await runCranbrookTool(tool, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error invoking ${name}: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    }
     if (
       name !== TOOL_NAME &&
       name !== RERUN_TOOL_NAME &&

@@ -764,6 +764,44 @@ async function ruckusCallEngineer(
 //     fine-grained PAT scoped to ONLY flatfeelandlord-com (Contents +
 //     Pull requests: read/write). The model never sees the token.
 
+const LIST_PRS_TOOL_NAME = "ruckus_list_blog_prs";
+const LIST_PRS_TOOL_DESC =
+  "List the blog posts on the flatfeelandlord-com website that are still held for review: every OPEN pull " +
+  "request titled [LEGAL REVIEW] or [CALENDAR REVIEW], oldest first, with its number, title, age in days and " +
+  "whether GitHub considers it mergeable. Use this whenever someone asks what is waiting for their OK, or says " +
+  "'proceed with all' / 'publish everything' — then call ruckus_publish_blog_pr once per PR number. Read only. " +
+  "Takes no arguments.";
+const LIST_PRS_TOOL_SCHEMA = { type: "object" as const, properties: {}, additionalProperties: false };
+
+async function ruckusListBlogPrs(forwardToken?: string): Promise<unknown> {
+  const expectedBearer = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  if (!expectedBearer || (forwardToken ?? "").trim() !== expectedBearer) {
+    throw new Error("ruckus_list_blog_prs: unauthorized bearer.");
+  }
+  const ghToken = (process.env.FFL_GITHUB_TOKEN ?? "").trim();
+  if (!ghToken) return { ok: false, error: "Not configured: FFL_GITHUB_TOKEN is missing from this deployment's env." };
+  const res = await githubApi(ghToken, "GET", `/repos/${PUBLISH_REPO}/pulls?state=open&per_page=100&sort=created&direction=asc`);
+  if (res.status !== 200 || !Array.isArray(res.json)) {
+    return { ok: false, error: `Could not list PRs (HTTP ${res.status}).` };
+  }
+  const now = Date.now();
+  const held = (res.json as { number: number; title: string; created_at: string; html_url: string }[])
+    .filter((p) => PUBLISH_TITLE_RE.test(p.title ?? ""));
+  const prs = [];
+  for (const p of held.slice(0, 25)) {
+    const one = await githubApi(ghToken, "GET", `/repos/${PUBLISH_REPO}/pulls/${p.number}`);
+    const state = one.status === 200 ? (one.json as { mergeable_state?: string }).mergeable_state ?? "unknown" : "unknown";
+    prs.push({
+      number: p.number,
+      title: p.title,
+      ageDays: Math.floor((now - Date.parse(p.created_at)) / 86_400_000),
+      url: p.html_url,
+      mergeable_state: state,
+    });
+  }
+  return { ok: true, count: prs.length, prs, note: prs.length ? "To publish, call ruckus_publish_blog_pr for each number the human approved (oldest first). A PR that is not 'clean' is still publishable: the tool queues it for the site's publish workflow." : "Nothing is waiting for review." };
+}
+
 const PUBLISH_TOOL_NAME = "ruckus_publish_blog_pr";
 const PUBLISH_REPO = "Moahashem/flatfeelandlord-com";
 const PUBLISH_TITLE_RE = /\[(LEGAL|CALENDAR) REVIEW\]/i;
@@ -775,8 +813,10 @@ const PUBLISH_TOOL_DESC =
   "legal sign-off: NEVER call this on your own judgment, on a hunch, or because a post " +
   "seems fine — no explicit human approval in this conversation, no call. Pass their " +
   "approval verbatim: it is posted on the PR as the audit record. Only works on OPEN PRs " +
-  `in ${PUBLISH_REPO} titled [LEGAL REVIEW] or [CALENDAR REVIEW] with green checks; ` +
-  "refuses everything else. Args: { pr_number, approved_by, approval_quote } (all " +
+  `in ${PUBLISH_REPO} titled [LEGAL REVIEW] or [CALENDAR REVIEW]; ` +
+  "refuses everything else. A PR that is not cleanly mergeable is still publishable: the tool queues it for the " +
+  "site's publish workflow (10 to 20 minutes) and returns queued:true. For 'proceed with all', call " +
+  "ruckus_list_blog_prs first and then this tool once per PR. Args: { pr_number, approved_by, approval_quote } (all " +
   "required; approved_by is the human's name, approval_quote their exact words). " +
   "Returns { ok, merged, title, url } or a refusal reason. After success, confirm to the " +
   "channel that the post is live (the site deploys automatically within a few minutes).";
@@ -897,14 +937,39 @@ async function ruckusPublishBlogPr(
     };
   }
   if (p.mergeable_state !== "clean") {
+    // 2026-10-11: this branch used to refuse, and because every weekly blog PR
+    // edits src/lib/blog.ts at the same spot, "not clean" was the normal
+    // state — Mo's "proceed with all" published nothing on 9/19 and 10/8. The
+    // repo now has a publish-review-pr workflow that merges main into the
+    // branch, resolves the usual conflicts, waits for checks and squash
+    // merges, triggered by a /publish-approved comment. The comment doubles
+    // as the audit record.
+    const queued = await githubApi(ghToken, "POST", `/repos/${PUBLISH_REPO}/issues/${prNumber}/comments`, {
+      body:
+        `/publish-approved\n\n` +
+        `✅ **Approved in the Ruckus channel.**\n\n` +
+        `Approved by: **${approvedBy}**\n` +
+        `Their words: "${approvalQuote.slice(0, 500)}"\n\n` +
+        `_PR was ${p.mergeable_state ?? "unknown"}; queued for the publish-review-pr workflow by Ruckus via ruckus_publish_blog_pr._`,
+    });
+    if (queued.status !== 201) {
+      return {
+        ok: false,
+        error: `Could not queue PR #${prNumber} for publishing (HTTP ${queued.status}).`,
+        title: p.title,
+        url: p.html_url,
+      };
+    }
     return {
-      ok: false,
-      error:
-        `PR #${prNumber} is not cleanly mergeable right now (state: ` +
-        `${p.mergeable_state ?? "unknown"}). Checks may still be running or something needs ` +
-        "a human look — report this back instead of retrying blindly.",
+      ok: true,
+      merged: false,
+      queued: true,
       title: p.title,
       url: p.html_url,
+      note:
+        "Queued: the site's publish workflow is merging the latest main into this post, re-running its checks and " +
+        "publishing it. That takes about 10 to 20 minutes. Tell the channel it is queued, not live; if it is still " +
+        "open an hour later, the workflow left a comment on the PR saying why.",
     };
   }
 
@@ -1017,6 +1082,7 @@ function buildServer(forwardToken?: string): Server {
       { name: DIAGNOSE_TOOL_NAME, description: DIAGNOSE_TOOL_DESC, inputSchema: DIAGNOSE_TOOL_SCHEMA },
       { name: ENGINEER_TOOL_NAME, description: ENGINEER_TOOL_DESC, inputSchema: ENGINEER_TOOL_SCHEMA },
       { name: PUBLISH_TOOL_NAME, description: PUBLISH_TOOL_DESC, inputSchema: PUBLISH_TOOL_SCHEMA },
+      { name: LIST_PRS_TOOL_NAME, description: LIST_PRS_TOOL_DESC, inputSchema: LIST_PRS_TOOL_SCHEMA },
     ],
   }));
 
@@ -1043,14 +1109,17 @@ function buildServer(forwardToken?: string): Server {
       name !== RERUN_TOOL_NAME &&
       name !== DIAGNOSE_TOOL_NAME &&
       name !== ENGINEER_TOOL_NAME &&
-      name !== PUBLISH_TOOL_NAME
+      name !== PUBLISH_TOOL_NAME &&
+      name !== LIST_PRS_TOOL_NAME
     ) {
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
     try {
       const args = (rawArgs ?? {}) as Record<string, unknown>;
       const result =
-        name === PUBLISH_TOOL_NAME
+        name === LIST_PRS_TOOL_NAME
+          ? await ruckusListBlogPrs(forwardToken)
+          : name === PUBLISH_TOOL_NAME
           ? await ruckusPublishBlogPr(args, forwardToken)
           : name === ENGINEER_TOOL_NAME
             ? await ruckusCallEngineer(args, forwardToken)

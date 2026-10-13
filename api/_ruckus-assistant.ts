@@ -8,7 +8,7 @@
  * Same auth as ruckus_send: the agent's forwarded bearer (= CRM CRON_SECRET).
  */
 
-export const ASSISTANT_TOOL_NAMES = ["assistant_mailboxes", "assistant_mail", "assistant_calendar"] as const;
+export const ASSISTANT_TOOL_NAMES = ["assistant_mailboxes", "assistant_mail", "assistant_calendar", "assistant_drive", "assistant_contacts", "assistant_tasks"] as const;
 export type AssistantToolName = (typeof ASSISTANT_TOOL_NAMES)[number];
 
 export function isAssistantTool(name: string): name is AssistantToolName {
@@ -22,8 +22,9 @@ export const ASSISTANT_TOOLS = [
   {
     name: "assistant_mailboxes",
     description:
-      "List the email + calendar accounts you can manage, whose they are, which business (ffl / cranbrook) and whether each is connected. " +
-      "Call this before saying you can or can't access someone's email. A mailbox not listed as connected cannot be read — give its owner the connect link from the result.",
+      "List the Google accounts you can work in: whose they are, which business (ffl / cranbrook / other), whether each is connected, and what it allows " +
+      "(can / missing among email, calendar, drive, contacts, tasks). Call this before saying you can or can't access someone's email, files, contacts or tasks. " +
+      "An account not connected — or missing a capability — can't be used for it: give its owner the reconnect link from the result.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -36,13 +37,14 @@ export const ASSISTANT_TOOLS = [
       "read {id} → full text; " +
       "modify {change: archive|unarchive|trash|untrash|mark_read|mark_unread|star|unstar|add_label|remove_label, ids[] OR query, label?} — trash is recoverable for 30 days, never permanent; max 500 per call; " +
       "unsubscribe {ids[] OR query, trash?: true} — uses each sender's own unsubscribe (one-click or unsubscribe email), once per sender; senders that only offer a web page come back in needsAPerson with the link; " +
-      "compose {to?, cc?, subject?, body, replyToId?, send?} — saves a DRAFT unless send: true; replyToId threads a reply to that message. " +
+      "compose {to?, cc?, subject?, body, replyToId?, send?} — saves a DRAFT unless send: true; replyToId threads a reply to that message; " +
+      "save_attachment {id (message id), filename?, folderId?} — saves the email's attachment(s) into Drive. " +
       "Example — 'unsubscribe me from advertising and delete it': action unsubscribe, query 'category:promotions', trash true; repeat while more is true.",
     inputSchema: {
       type: "object",
       properties: {
         mailbox: { type: "string", description: "The mailbox email, e.g. yuli@flatfeelandlord.com." },
-        action: { type: "string", enum: ["search", "read", "modify", "unsubscribe", "compose"] },
+        action: { type: "string", enum: ["search", "read", "modify", "unsubscribe", "compose", "save_attachment"] },
         query: { type: "string", description: "Gmail search, for search / modify / unsubscribe." },
         max: { type: "integer", minimum: 1, maximum: 50 },
         id: { type: "string", description: "Message id, for read." },
@@ -59,6 +61,8 @@ export const ASSISTANT_TOOLS = [
         body: { type: "string", description: "Plain text; blank lines start new paragraphs." },
         replyToId: { type: "string" },
         send: { type: "boolean", description: "true = send now. Default saves a draft." },
+        filename: { type: "string", description: "save_attachment: which attachment (default all)." },
+        folderId: { type: "string", description: "save_attachment: Drive folder to save into." },
       },
       required: ["mailbox", "action"],
       additionalProperties: false,
@@ -101,6 +105,95 @@ export const ASSISTANT_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "assistant_drive",
+    description:
+      "Work in a connected account's Google Drive — Docs, Sheets, Slides and files." +
+      OWNER_RULE +
+      " Actions: search {query (plain words, or Drive syntax like \"name contains 'Lease'\"), type?: doc|sheet|slides|folder, folderId?, max?} → files with id, name, type, link; " +
+      "read {fileId, range? (sheets, e.g. 'Rent Roll!A1:H200')} → a Doc/Slides as text, a Sheet as rows (first tab unless range), a text file as text; " +
+      "create {type: doc|sheet|folder, name, folderId?, text? (doc), rows? (sheet: list of rows)}; " +
+      "append_doc {fileId, text} → adds to the end of a Doc; " +
+      "write_sheet {fileId, range, rows, mode?: overwrite|append}; " +
+      "move {fileId, name? (rename), folderId? (move)}; " +
+      "share {fileId, emails[], role?: reader|commenter|writer, notify?, message?, allowExternal?} — company domains only unless the owner explicitly asked to share outside (allowExternal: true); " +
+      "trash {fileId} — Drive's Trash, recoverable 30 days.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mailbox: { type: "string" },
+        action: { type: "string", enum: ["search", "read", "create", "append_doc", "write_sheet", "move", "share", "trash"] },
+        query: { type: "string" },
+        type: { type: "string", enum: ["doc", "sheet", "slides", "folder"] },
+        folderId: { type: "string" },
+        max: { type: "integer", minimum: 1, maximum: 100 },
+        fileId: { type: "string" },
+        range: { type: "string" },
+        name: { type: "string" },
+        text: { type: "string" },
+        rows: { type: "array", items: { type: "array", items: {} } },
+        mode: { type: "string", enum: ["overwrite", "append"] },
+        emails: { type: "array", items: { type: "string" } },
+        role: { type: "string", enum: ["reader", "commenter", "writer"] },
+        notify: { type: "boolean" },
+        message: { type: "string" },
+        allowExternal: { type: "boolean", description: "Only when the owner explicitly asked to share outside the company." },
+      },
+      required: ["mailbox", "action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "assistant_contacts",
+    description:
+      "A connected account's Google Contacts." +
+      OWNER_RULE +
+      " Actions: search {query (name, email or phone), max?} → people from their contacts, the company directory and people they've emailed; " +
+      "create {name, email?, phone?, company?, title?, notes?}; update {contactId (people/… from a search, own contacts only), + fields to change}. No deletes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mailbox: { type: "string" },
+        action: { type: "string", enum: ["search", "create", "update"] },
+        query: { type: "string" },
+        max: { type: "integer", minimum: 1, maximum: 30 },
+        contactId: { type: "string" },
+        name: { type: "string" },
+        email: { type: "string" },
+        phone: { type: "string" },
+        company: { type: "string" },
+        title: { type: "string" },
+        notes: { type: "string" },
+      },
+      required: ["mailbox", "action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "assistant_tasks",
+    description:
+      "A connected account's Google Tasks (their to-do list)." +
+      OWNER_RULE +
+      " Actions: list {list?, includeDone?}; add {title, notes?, due? (YYYY-MM-DD — Google Tasks has dates, not times), list?}; " +
+      "update {taskId, title?, notes?, due?, done? (true = complete), list?}; delete {taskId, list?} — prefer done: true unless told to delete.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mailbox: { type: "string" },
+        action: { type: "string", enum: ["list", "add", "update", "delete"] },
+        list: { type: "string", description: "Task list name; default is the first list." },
+        includeDone: { type: "boolean" },
+        max: { type: "integer", minimum: 1, maximum: 100 },
+        taskId: { type: "string" },
+        title: { type: "string" },
+        notes: { type: "string" },
+        due: { type: "string" },
+        done: { type: "boolean" },
+      },
+      required: ["mailbox", "action"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function baseUrl(): string {
@@ -114,7 +207,15 @@ function baseUrl(): string {
 export async function runAssistantTool(name: AssistantToolName, args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
   const token = (forwardToken ?? "").trim() || (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
   if (!token) throw new Error("Not configured: RUCKUS_SEND_TOKEN (= CRM CRON_SECRET) is missing.");
-  const body = name === "assistant_mailboxes" ? { tool: "mailboxes" } : { ...args, tool: name === "assistant_mail" ? "mail" : "calendar" };
+  const TOOL: Record<AssistantToolName, string> = {
+    assistant_mailboxes: "mailboxes",
+    assistant_mail: "mail",
+    assistant_calendar: "calendar",
+    assistant_drive: "drive",
+    assistant_contacts: "contacts",
+    assistant_tasks: "tasks",
+  };
+  const body = name === "assistant_mailboxes" ? { tool: "mailboxes" } : { ...args, tool: TOOL[name] };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 110_000);
   try {

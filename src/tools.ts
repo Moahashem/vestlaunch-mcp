@@ -45,6 +45,27 @@ const WRITE_METHODS: ReadonlyArray<HttpMethod> = ["POST", "PATCH", "PUT", "DELET
 export interface BuildOptions {
   enableWrites: boolean;
   availableScopes: ReadonlyArray<string>;
+  /**
+   * Hide account administration even when writes are on: creating or
+   * deleting workspaces, API keys and webhooks. Set per connector with
+   * VESTLAUNCH_BLOCK_ADMIN=true (Mo, 2026-10-13 — the Cranbrook desktop
+   * connector gets full read/write on Cranbrook records, not the keys to
+   * the building). Reads are never hidden.
+   */
+  blockAdmin?: boolean;
+}
+
+/** Account administration: workspace, API-key and webhook changes. Reads excluded. */
+export function isAdminTool(tool: { method: string; name: string; scope?: string }): boolean {
+  if (tool.method === "GET") return false;
+  const scope = tool.scope ?? "";
+  return (
+    scope.startsWith("admin:") ||
+    scope.startsWith("webhooks:") ||
+    scope.startsWith("api_keys:") ||
+    scope === "workspaces:write" ||
+    /api_key|webhook|workspace/.test(tool.name)
+  );
 }
 
 /**
@@ -58,6 +79,7 @@ export function buildToolDefinition(
 ): McpToolDefinition | null {
   const isWrite = WRITE_METHODS.includes(tool.method);
   if (isWrite && !opts.enableWrites) return null;
+  if (opts.blockAdmin && isAdminTool(tool)) return null;
   if (!hasScopeFor(tool.scope, opts.availableScopes)) return null;
 
   const writeBanner = isWrite ? "[WRITE] " : "";

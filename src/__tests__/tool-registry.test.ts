@@ -166,3 +166,21 @@ describe("DELETE args reach a route that reads query params", () => {
     expect(calls[0].body).toEqual({ contactIds: ["c1", "c2"] });
   });
 });
+
+describe("blockAdmin (Mo, 2026-10-13)", () => {
+  const T = (o: Record<string, unknown>) => ({ name: "x", method: "POST", path: "/api/v1/x", scope: "contacts:write", description: "d", ...o }) as any;
+  const B = { enableWrites: true, availableScopes: ["*"], blockAdmin: true };
+  it("hides workspace, API-key and webhook writes", () => {
+    expect(buildToolDefinition(T({ name: "delete_workspace", method: "DELETE", path: "/api/v1/workspaces/:id", scope: "workspaces:write" }), B)).toBeNull();
+    expect(buildToolDefinition(T({ name: "create_api_key", scope: "api_keys:write" }), B)).toBeNull();
+    expect(buildToolDefinition(T({ name: "create_webhook", scope: "webhooks:write" }), B)).toBeNull();
+  });
+  it("keeps record writes, deletes and admin reads", () => {
+    expect(buildToolDefinition(T({ name: "update_event_type", method: "PATCH", scope: "event_types:write" }), B)).not.toBeNull();
+    expect(buildToolDefinition(T({ name: "delete_contact", method: "DELETE", path: "/api/v1/contacts/:id" }), B)).not.toBeNull();
+    expect(buildToolDefinition(T({ name: "list_workspaces", method: "GET", scope: "workspaces:read" }), B)).not.toBeNull();
+  });
+  it("is off unless asked for", () => {
+    expect(buildToolDefinition(T({ name: "create_api_key", scope: "api_keys:write" }), { enableWrites: true, availableScopes: ["*"] })).not.toBeNull();
+  });
+});

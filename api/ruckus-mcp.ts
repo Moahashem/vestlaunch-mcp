@@ -54,8 +54,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { isCranbrookTool, loadCranbrookTools, runCranbrookTool, type CranbrookTool } from "./_ruckus-cranbrook";
+import { ASSISTANT_TOOLS, isAssistantTool, runAssistantTool } from "./_ruckus-assistant";
 
-export const config = { maxDuration: 60 };
+// 120s: a mailbox cleanup (unsubscribe + trash up to 500 messages) can take a minute.
+export const config = { maxDuration: 120 };
 
 const TOOL_NAME = "ruckus_send";
 const TOOL_DESC =
@@ -1083,6 +1085,7 @@ function buildServer(forwardToken?: string): Server {
       { name: ENGINEER_TOOL_NAME, description: ENGINEER_TOOL_DESC, inputSchema: ENGINEER_TOOL_SCHEMA },
       { name: PUBLISH_TOOL_NAME, description: PUBLISH_TOOL_DESC, inputSchema: PUBLISH_TOOL_SCHEMA },
       { name: LIST_PRS_TOOL_NAME, description: LIST_PRS_TOOL_DESC, inputSchema: LIST_PRS_TOOL_SCHEMA },
+      ...ASSISTANT_TOOLS,
     ],
   }));
 
@@ -1099,6 +1102,19 @@ function buildServer(forwardToken?: string): Server {
         const tool = (await cranbrook()).find((t) => t.name === name);
         if (!tool) return { content: [{ type: "text", text: `Cranbrook tool not available: ${name}` }], isError: true };
         const result = await runCranbrookTool(tool, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error invoking ${name}: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    }
+    if (isAssistantTool(name)) {
+      // Same real gate as the Cranbrook tools: only Ruckus's vault credential.
+      const expected = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+      if (!expected || (forwardToken ?? "").trim() !== expected) {
+        return { content: [{ type: "text", text: "Unauthorized for mailbox tools." }], isError: true };
+      }
+      try {
+        const result = await runAssistantTool(name, (rawArgs ?? {}) as Record<string, unknown>, forwardToken);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error invoking ${name}: ${err instanceof Error ? err.message : String(err)}` }], isError: true };

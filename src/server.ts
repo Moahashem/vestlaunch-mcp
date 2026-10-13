@@ -74,6 +74,7 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
     gitHead: identity.gitHead,
     baseUrl: config.baseUrl,
     enableWrites: config.enableWrites,
+    blockAdmin: config.blockAdmin,
   });
 
   const manifest = await loadManifest(client);
@@ -89,6 +90,7 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
   for (const tool of manifest.capabilities) {
     const def = buildToolDefinition(tool, {
       enableWrites: config.enableWrites,
+      blockAdmin: config.blockAdmin,
       availableScopes: manifest.identity.scopes,
     });
     if (def) definitions.push(def);

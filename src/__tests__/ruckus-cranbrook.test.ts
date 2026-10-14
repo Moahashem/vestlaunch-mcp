@@ -63,3 +63,11 @@ describe("cranbrook tools", () => {
     expect(await runCranbrookTool(list, {})).toMatchObject({ ok: false });
   });
 });
+
+describe("feature-request tickets: read and add notes only (Mo 2026-10-14)", () => {
+  it("keeps list + notes, drops update", () => {
+    expect(isExcludedTool({ name: "list_feature_requests", method: "GET", path: "/api/v1/feature-requests", scope: "feature_requests:read" })).toBe(false);
+    expect(isExcludedTool({ name: "add_feature_request_note", method: "POST", path: "/api/v1/feature-requests/:id/notes", scope: "feature_requests:write" })).toBe(false);
+    expect(isExcludedTool({ name: "update_feature_request", method: "PATCH", path: "/api/v1/feature-requests/:id", scope: "feature_requests:write" })).toBe(true);
+  });
+});

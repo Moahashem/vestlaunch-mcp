@@ -23,8 +23,11 @@
 const PREFIX = "cranbrook_";
 
 /** Never exposed: deletes, and account administration. */
-export function isExcludedTool(t: { method: string; scope?: string; name: string }): boolean {
+export function isExcludedTool(t: { method: string; scope?: string; name: string; path?: string }): boolean {
   if (t.method === "DELETE") return true;
+  // Feature-request tickets (Mo 2026-10-14): Ruckus reads them and adds notes, and never
+  // changes a ticket's status, priority or wording — so no write except POST …/notes.
+  if ((t.scope ?? "").startsWith("feature_requests:") && t.method !== "GET" && !/\/notes\/?$/.test(t.path ?? "")) return true;
   const scope = t.scope ?? "";
   return scope.startsWith("admin:") || scope.startsWith("webhooks:") || scope === "workspaces:write" || (/api_key|webhook|workspace/.test(t.name) && t.method !== "GET");
 }

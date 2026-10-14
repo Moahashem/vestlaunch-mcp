@@ -55,6 +55,7 @@ import {
 
 import { isCranbrookTool, loadCranbrookTools, runCranbrookTool, type CranbrookTool } from "./_ruckus-cranbrook";
 import { ASSISTANT_TOOLS, isAssistantTool, runAssistantTool } from "./_ruckus-assistant";
+import { ORDER_TOOLS, isOrderTool, runOrderTool } from "./_ruckus-orders";
 
 // 120s: a mailbox cleanup (unsubscribe + trash up to 500 messages) can take a minute.
 export const config = { maxDuration: 120 };
@@ -1086,6 +1087,7 @@ function buildServer(forwardToken?: string): Server {
       { name: PUBLISH_TOOL_NAME, description: PUBLISH_TOOL_DESC, inputSchema: PUBLISH_TOOL_SCHEMA },
       { name: LIST_PRS_TOOL_NAME, description: LIST_PRS_TOOL_DESC, inputSchema: LIST_PRS_TOOL_SCHEMA },
       ...ASSISTANT_TOOLS,
+      ...ORDER_TOOLS,
     ],
   }));
 
@@ -1115,6 +1117,19 @@ function buildServer(forwardToken?: string): Server {
       }
       try {
         const result = await runAssistantTool(name, (rawArgs ?? {}) as Record<string, unknown>, forwardToken);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error invoking ${name}: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+      }
+    }
+    if (isOrderTool(name)) {
+      // Standing orders + memory (Mo 2026-10-13): same real gate.
+      const expected = (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+      if (!expected || (forwardToken ?? "").trim() !== expected) {
+        return { content: [{ type: "text", text: "Unauthorized for standing orders." }], isError: true };
+      }
+      try {
+        const result = await runOrderTool(name, (rawArgs ?? {}) as Record<string, unknown>, forwardToken);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error invoking ${name}: ${err instanceof Error ? err.message : String(err)}` }], isError: true };

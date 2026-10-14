@@ -33,12 +33,15 @@ export const ORDER_TOOLS = [
       "report {id, summary, state?, failed?, error?} — call this at the END of every scheduled run you are given: summary = what you posted in one or two lines, " +
       "state = a small JSON object of what the next run needs (ids or titles already mentioned, the time you covered through). " +
       "commitment {what, owner (a person), due 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM' Houston, chatId, requestedBy (who it was promised to)} — someone promised something by a date: logs a ledger item under the owner and chases THEM in that chat when due; use it for delegation too ('have Sergio…' → do it, then log the commitment). " +
+      "huddle_undo {n, reason?, by} — a churn-list update landed on the wrong owner or was wrong: restores the board status, marks its contact notes VOID, reopens the churn item; people can also just type 'undo #2' in chat. " +
       "A shared chat (people beyond Mo and Yuliana) refuses orders that touch email, calendar, money or people matters — relay the reason and offer the main chat. " +
       "A scheduled run may do what you may do live in chat; it must not send email, delete, or message a renter or owner unless its instruction says so.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment"] },
+        action: { type: "string", enum: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo"] },
+        n: { type: "integer", description: "huddle_undo: the number on today's churn list (1-99)." },
+        reason: { type: "string", description: "huddle_undo: why, in a few words (goes on the VOID note)." },
         kind: { type: "string", enum: ["recurring", "once", "watch"] },
         watch: { type: "object", description: "watch: {type: gmail|ledger|agent_failed|cfa_application|meeting, mailbox?, query?, lane?, redOnly?, agentKey?, leadMinutes?}", additionalProperties: true },
         everyMinutes: { type: "integer", minimum: 5, description: "watch: minutes between checks (default 15)." },
@@ -111,7 +114,7 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
   if (!token) throw new Error("Not configured: RUCKUS_SEND_TOKEN (= CRM CRON_SECRET) is missing.");
   const action = typeof args.action === "string" ? args.action : "";
   const allowed: Record<OrderToolName, string[]> = {
-    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment"],
+    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo"],
     ruckus_memory: ["remember", "forget", "memories", "questionnaire", "profile_set", "profile_get"],
   };
   if (!allowed[name].includes(action)) throw new Error(`${name}: action must be one of ${allowed[name].join(", ")}`);

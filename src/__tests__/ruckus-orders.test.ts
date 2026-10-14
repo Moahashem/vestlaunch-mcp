@@ -4,8 +4,8 @@ import { ORDER_TOOLS, isOrderTool, runOrderTool } from "../../api/_ruckus-orders
 
 describe("ruckus order tools", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it("exposes the two tools, action required", () => {
-    expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["ruckus_schedule", "ruckus_memory"]);
+  it("exposes the tools, action required", () => {
+    expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman"]);
     expect(isOrderTool("ruckus_schedule")).toBe(true);
     expect(isOrderTool("assistant_mail")).toBe(false);
     for (const t of ORDER_TOOLS) expect((t.inputSchema as { required?: string[] }).required).toEqual(["action"]);
@@ -41,5 +41,17 @@ describe("ruckus tools v2 (10/13 build it all)", () => {
     expect(s.description).toMatch(/ONE order with two times/);
     expect(s.description).toMatch(/wakes you only on a NEW hit/);
     expect(ORDER_TOOLS[1].description).toMatch(/until\?/);
+  });
+});
+
+
+describe("approved actions + ResMan reads (Mo 2026-10-14)", () => {
+  it("ruckus_action says it runs only after approval", () => {
+    const t = ORDER_TOOLS.find((x) => x.name === "ruckus_action")!;
+    expect(t.description).toMatch(/approve A12/);
+    expect(t.description).toMatch(/never say it's done before the result posts/);
+  });
+  it("ruckus_resman is read only", () => {
+    expect(ORDER_TOOLS.find((x) => x.name === "ruckus_resman")!.description).toMatch(/read only, no approval needed/);
   });
 });

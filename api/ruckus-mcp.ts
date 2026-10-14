@@ -58,7 +58,7 @@ import { ASSISTANT_TOOLS, isAssistantTool, runAssistantTool } from "./_ruckus-as
 import { ORDER_TOOLS, isOrderTool, runOrderTool } from "./_ruckus-orders";
 
 // 120s: a mailbox cleanup (unsubscribe + trash up to 500 messages) can take a minute.
-export const config = { maxDuration: 120 };
+export const config = { maxDuration: 300 };
 
 const TOOL_NAME = "ruckus_send";
 const TOOL_DESC =

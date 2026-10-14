@@ -38,6 +38,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import mcpHandler from "./api/mcp";
 import ruckusMcpHandler from "./api/ruckus-mcp";
+import ruckusExecuteHandler from "./api/ruckus-execute";
 import agentOsMcpHandler from "./api/agent-os-mcp";
 import cronHandler from "./api/cron/daily-lead-count";
 import occupancyCronHandler from "./api/cron/daily-occupancy";
@@ -75,6 +76,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (path === "/api/ruckus-mcp") {
       await ruckusMcpHandler(req as IncomingMessage & { body?: unknown }, res);
+      return;
+    }
+    if (path === "/api/ruckus-execute") {
+      await ruckusExecuteHandler(req as IncomingMessage & { body?: unknown }, res);
       return;
     }
     if (path === "/api/agent-os-mcp") {
@@ -183,6 +188,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
           endpoints: [
             "/api/mcp",
             "/api/ruckus-mcp",
+            "/api/ruckus-execute",
             "/api/agent-os-mcp",
             "/api/recruiting-mcp",
             "/api/cron/daily-lead-count",

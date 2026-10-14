@@ -74,11 +74,16 @@ export const ORDER_TOOLS = [
       "rule per call, under 600 characters — and never store email contents, passwords, card numbers or anything a person would not want in a settings page. Actions: " +
       "remember {text, by (who told you), scope?: global | lane:sales | lane:churn | lane:cranbrook | lane:wo | lane:delinquency | lane:blog, until?: 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM' Houston — for day mode ('Mo is out Thursday') so it expires on its own} → stored (duplicates are merged); " +
       "forget {id, by} or forget {match (words from the memory), by} — one match forgets, several come back for you to ask which; " +
-      "memories {query?} → what you remember (id, text, who, when). Confirm a memory in one line, quoting it back.",
+      "memories {query?} → what you remember (id, text, who, when). Confirm a memory in one line, quoting it back. " +
+      "COMMUNICATION-STYLE PROFILES (Mo 2026-10-14): questionnaire {person: first name} → the 10-question text to post AS IS with ruckus_send (one message out, one message back); " +
+      "profile_set {person, profile (compact plain words: what first, length, shape, on problems, on decisions, nudging, learning, tone, timing/quiet hours, pet peeves), by} → saved, replaces the old one; read it back and accept corrections with profile_set again; " +
+      "profile_get {person?} → the saved profiles. Every kickoff carries them as HOW EACH PERSON WANTS IT — write to each person by theirs.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["remember", "forget", "memories"] },
+        action: { type: "string", enum: ["remember", "forget", "memories", "questionnaire", "profile_set", "profile_get"] },
+        person: { type: "string", description: "questionnaire / profile_*: the person's first name." },
+        profile: { type: "string", description: "profile_set: the compact profile text." },
         text: { type: "string" },
         by: { type: "string" },
         scope: { type: "string" },
@@ -107,7 +112,7 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
   const action = typeof args.action === "string" ? args.action : "";
   const allowed: Record<OrderToolName, string[]> = {
     ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment"],
-    ruckus_memory: ["remember", "forget", "memories"],
+    ruckus_memory: ["remember", "forget", "memories", "questionnaire", "profile_set", "profile_get"],
   };
   if (!allowed[name].includes(action)) throw new Error(`${name}: action must be one of ${allowed[name].join(", ")}`);
   const controller = new AbortController();

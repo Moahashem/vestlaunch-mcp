@@ -1,0 +1,34 @@
+/** Ruckus's standing orders + memory tools (Mo, 2026-10-13). */
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { ORDER_TOOLS, isOrderTool, runOrderTool } from "../../api/_ruckus-orders";
+
+describe("ruckus order tools", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("exposes the two tools, action required", () => {
+    expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["ruckus_schedule", "ruckus_memory"]);
+    expect(isOrderTool("ruckus_schedule")).toBe(true);
+    expect(isOrderTool("assistant_mail")).toBe(false);
+    for (const t of ORDER_TOOLS) expect((t.inputSchema as { required?: string[] }).required).toEqual(["action"]);
+  });
+  it("tells the agent to set orders itself and to report at the end of a run", () => {
+    const s = ORDER_TOOLS[0].description;
+    expect(s).toMatch(/never say a developer must build it/);
+    expect(s).toMatch(/call this at the END of every scheduled run/);
+    expect(s).toMatch(/must not send email, delete, or message a renter/);
+    expect(ORDER_TOOLS[1].description).toMatch(/never store email contents, passwords, card numbers/);
+  });
+  it("relays to the CRM schedule endpoint with the forwarded bearer", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, orders: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const r = await runOrderTool("ruckus_schedule", { action: "list" }, "tok");
+    expect(r).toEqual({ ok: true, orders: [] });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/\/api\/ringcentral\/ruckus-schedule$/);
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
+    expect(JSON.parse(init.body as string)).toEqual({ action: "list" });
+  });
+  it("refuses an action the tool does not own", async () => {
+    await expect(runOrderTool("ruckus_memory", { action: "create" }, "tok")).rejects.toThrow(/action must be one of remember, forget, memories/);
+    await expect(runOrderTool("ruckus_schedule", { action: "remember" }, "tok")).rejects.toThrow(/action must be one of/);
+  });
+});

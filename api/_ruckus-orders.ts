@@ -8,7 +8,7 @@
  * Same auth as ruckus_send: the agent's forwarded bearer (= CRM CRON_SECRET).
  */
 
-export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman"] as const;
+export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman", "ruckus_jordan"] as const;
 export type OrderToolName = (typeof ORDER_TOOL_NAMES)[number];
 
 export function isOrderTool(name: string): name is OrderToolName {
@@ -148,6 +148,30 @@ ORDER_TOOLS.push(
       additionalProperties: false,
     },
   },
+  {
+    name: "ruckus_jordan",
+    description:
+      "Talk to Jordan, FFL's AI sales assistant and your coworker (she texts and emails landlord leads for Sam and knows each lead's conversation, drafts, consent and waits). " +
+      "ask {question, lead?: name or contact id} → her answer now (no lead → her whole pipeline: what's waiting on Sam, recent sends). " +
+      "tell {lead, text, by: who on the team said it, send?: true, replyToId?} → a team note she follows in every message to that lead for 30 days; with send: true she also writes and sends that lead a message now " +
+      "(consent, quiet hours, STOP and wait rules still apply; the result says sent, queued for their texting hours, or why not). Get Sam or Mo's OK before a send about price, terms or a promise. " +
+      "log {hours?} → what you and Jordan said to each other.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["ask", "tell", "log"] },
+        question: { type: "string" },
+        lead: { type: "string" },
+        text: { type: "string" },
+        by: { type: "string" },
+        send: { type: "boolean" },
+        replyToId: { type: "string" },
+        hours: { type: "number" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
 );
 
 function baseUrl(): string {
@@ -168,13 +192,18 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
     args = { ...args, action: action === "propose" ? "propose_action" : "list_actions" };
     return runOrderTool("ruckus_schedule", args, forwardToken);
   }
+  if (name === "ruckus_jordan") {
+    if (action !== "ask" && action !== "tell" && action !== "log") throw new Error("ruckus_jordan: action must be ask, tell or log");
+    args = { ...args, action: `jordan_${action}` };
+    return runOrderTool("ruckus_schedule", args, forwardToken);
+  }
   const allowed: Record<string, string[]> = {
-    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "propose_action", "list_actions"],
+    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "propose_action", "list_actions", "jordan_ask", "jordan_tell", "jordan_log"],
     ruckus_memory: ["remember", "forget", "memories", "questionnaire", "profile_set", "profile_get"],
   };
   if (!allowed[name].includes(action)) throw new Error(`${name}: action must be one of ${allowed[name].join(", ")}`);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 55_000);
+  const timer = setTimeout(() => controller.abort(), String(args.action).startsWith("jordan_") ? 120_000 : 55_000);
   try {
     const res = await fetch(`${baseUrl()}/api/ringcentral/ruckus-schedule`, {
       method: "POST",

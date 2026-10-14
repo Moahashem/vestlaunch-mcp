@@ -28,7 +28,7 @@ describe("ruckus order tools", () => {
     expect(JSON.parse(init.body as string)).toEqual({ action: "list" });
   });
   it("refuses an action the tool does not own", async () => {
-    await expect(runOrderTool("ruckus_memory", { action: "create" }, "tok")).rejects.toThrow(/action must be one of remember, forget, memories/);
+    await expect(runOrderTool("ruckus_memory", { action: "create" }, "tok")).rejects.toThrow(/action must be one of remember, forget, memories, questionnaire, profile_set, profile_get/);
     await expect(runOrderTool("ruckus_schedule", { action: "remember" }, "tok")).rejects.toThrow(/action must be one of/);
   });
 });

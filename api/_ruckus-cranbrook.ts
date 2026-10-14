@@ -32,7 +32,7 @@ export function isExcludedTool(t: { method: string; scope?: string; name: string
   return scope.startsWith("admin:") || scope.startsWith("webhooks:") || scope === "workspaces:write" || (/api_key|webhook|workspace/.test(t.name) && t.method !== "GET");
 }
 
-interface ManifestTool {
+export interface ManifestTool {
   name: string;
   method: string;
   path: string;
@@ -58,7 +58,7 @@ export function cranbrookKey(): string {
   return (process.env.RUCKUS_CRANBROOK_API_KEY ?? "").trim();
 }
 
-async function crmCall(method: string, path: string, args: Record<string, unknown>, key: string): Promise<unknown> {
+export async function crmCall(method: string, path: string, args: Record<string, unknown>, key: string): Promise<unknown> {
   const url = new URL(`${baseUrl()}${path}`);
   // The key decides the business; a caller can't point it elsewhere.
   const clean = Object.fromEntries(Object.entries(args).filter(([k, v]) => k !== "workspace_id" && k !== "workspaceId" && v !== undefined));
@@ -142,4 +142,37 @@ export async function runCranbrookTool(tool: CranbrookTool, args: Record<string,
     return encodeURIComponent(v);
   });
   return crmCall(tool.method, path, rest, key);
+}
+
+
+/**
+ * Approved actions (Mo 2026-10-14): run ONE manifest tool by name with the key for its
+ * business, after ffl-crm checked a person's "approve A12". Deletes and account
+ * administration stay off even with approval; everything else (e.g. a ticket's status)
+ * is allowed because a person approved this exact call.
+ */
+export async function runApprovedTool(input: { business: "ffl" | "cranbrook"; tool: string; args: Record<string, unknown> }): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+  const name = input.tool.replace(/^cranbrook_/, "");
+  const ffl = (process.env.VESTLAUNCH_API_KEY ?? "").trim();
+  const cran = cranbrookKey();
+  const keys = input.business === "cranbrook" ? [cran] : [ffl, cran];
+  for (const key of keys.filter(Boolean)) {
+    const me = (await crmCall("GET", "/api/v1/me", {}, key)) as { data?: { capabilities?: ManifestTool[] } } | null;
+    const cap = (me?.data?.capabilities ?? []).find((c) => c.name === name);
+    if (!cap) continue;
+    if (cap.method === "DELETE") return { ok: false, error: "Deletes are never run by Ruckus, approved or not." };
+    const scope = cap.scope ?? "";
+    if (scope.startsWith("admin:") || scope.startsWith("webhooks:") || scope === "workspaces:write" || (/api_key|webhook|workspace/.test(cap.name) && cap.method !== "GET")) return { ok: false, error: "Account administration is never run by Ruckus." };
+    const rest: Record<string, unknown> = { ...input.args };
+    const path = cap.path.replace(PARAM, (_, p: string) => {
+      const v = rest[p];
+      delete rest[p];
+      if (typeof v !== "string" || !v) throw new Error(`Missing required path parameter: ${p}`);
+      return encodeURIComponent(v);
+    });
+    const result = await crmCall(cap.method, path, rest, key);
+    const failed = !!result && typeof result === "object" && (result as { ok?: boolean }).ok === false;
+    return failed ? { ok: false, error: String((result as { error?: string }).error ?? "the CRM refused it") } : { ok: true, result };
+  }
+  return { ok: false, error: `No VestLaunch tool named ${name} is available to Ruckus's keys.` };
 }

@@ -8,7 +8,7 @@
  * Same auth as ruckus_send: the agent's forwarded bearer (= CRM CRON_SECRET).
  */
 
-export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory"] as const;
+export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman"] as const;
 export type OrderToolName = (typeof ORDER_TOOL_NAMES)[number];
 
 export function isOrderTool(name: string): name is OrderToolName {
@@ -101,6 +101,55 @@ export const ORDER_TOOLS = [
   },
 ];
 
+ORDER_TOOLS.push(
+  {
+    name: "ruckus_action",
+    description:
+      "Do something that needs a person's OK (Mo 2026-10-14: take action in ResMan, AppFolio, VestLaunch 'so long as it gets explicit approval'). " +
+      "propose {system: resman|appfolio|vestlaunch|paige, summary (ONE line: what will change), requestedBy (who asked), and EITHER instruction (resman/appfolio: the exact step with names, unit numbers, amounts, dates — one concrete change) " +
+      "OR tool + args (vestlaunch: a VestLaunch tool name such as update_feature_request, update_contact, create_task, with its exact arguments), business?: ffl|cranbrook, chatId?} " +
+      "→ an approval card with a code (A12) is posted; Mo or Yuliana replies 'approve A12' and code runs it and posts the result (✅/⚠️). paige = an extra Paige AP run now (no instruction needed). " +
+      "Tell the person the code and that it runs after approval; never say it's done before the result posts. list → recent requests and results.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["propose", "list"] },
+        system: { type: "string", enum: ["resman", "appfolio", "vestlaunch", "paige"] },
+        summary: { type: "string" },
+        instruction: { type: "string" },
+        tool: { type: "string" },
+        args: { type: "object", additionalProperties: true },
+        business: { type: "string", enum: ["ffl", "cranbrook"] },
+        requestedBy: { type: "string" },
+        chatId: { type: "string" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ruckus_resman",
+    description:
+      "Read ResMan (Cranbrook Forest's accounting system) live — read only, no approval needed. vendors {term} → matching vendors (id, default GL, 1099). " +
+      "vendor_invoices {vendor, start?: 'M/D/YYYY' (default 1/1/2025), end?: default today, number?: invoice #} → every invoice for that vendor in the range, ALL statuses incl. paid " +
+      "(number, dates, paid date, description, expense type, total, status). Takes about a minute; if Paige is mid-run it says to try again in ~10 minutes. " +
+      "Use it before saying whether an invoice is in ResMan, paid or open. Cranbrook data: post only in chats that may hear Cranbrook.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["vendors", "vendor_invoices"] },
+        term: { type: "string" },
+        vendor: { type: "string" },
+        start: { type: "string" },
+        end: { type: "string" },
+        number: { type: "string" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+);
+
 function baseUrl(): string {
   return (
     (process.env.RUCKUS_SEND_BASE_URL ?? "").trim().replace(/\/+$/, "") ||
@@ -113,8 +162,14 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
   const token = (forwardToken ?? "").trim() || (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
   if (!token) throw new Error("Not configured: RUCKUS_SEND_TOKEN (= CRM CRON_SECRET) is missing.");
   const action = typeof args.action === "string" ? args.action : "";
-  const allowed: Record<OrderToolName, string[]> = {
-    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo"],
+  if (name === "ruckus_resman") return runResman(args);
+  if (name === "ruckus_action") {
+    if (action !== "propose" && action !== "list") throw new Error("ruckus_action: action must be propose or list");
+    args = { ...args, action: action === "propose" ? "propose_action" : "list_actions" };
+    return runOrderTool("ruckus_schedule", args, forwardToken);
+  }
+  const allowed: Record<string, string[]> = {
+    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "propose_action", "list_actions"],
     ruckus_memory: ["remember", "forget", "memories", "questionnaire", "profile_set", "profile_get"],
   };
   if (!allowed[name].includes(action)) throw new Error(`${name}: action must be one of ${allowed[name].join(", ")}`);
@@ -136,4 +191,26 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
   } finally {
     clearTimeout(timer);
   }
+}
+
+
+/** ResMan reads through the VPS operator (stream.vestlaunch.com/ruckus-ops). */
+async function runResman(args: Record<string, unknown>): Promise<unknown> {
+  const token = (process.env.RUCKUS_OPS_TOKEN ?? "").trim();
+  if (!token) return { ok: false, error: "ResMan access is not configured (RUCKUS_OPS_TOKEN)." };
+  const base = (process.env.RUCKUS_OPS_URL ?? "https://stream.vestlaunch.com/ruckus-ops").replace(/\/+$/, "");
+  const action = String(args.action ?? "");
+  const q = new URLSearchParams();
+  let path: string;
+  if (action === "vendors") {
+    path = "/resman/vendors";
+    q.set("term", String(args.term ?? ""));
+  } else if (action === "vendor_invoices") {
+    path = "/resman/vendor-invoices";
+    if (!args.vendor) return { ok: false, error: "vendor is required" };
+    for (const k of ["vendor", "start", "end", "number"]) if (args[k]) q.set(k, String(args[k]));
+  } else return { ok: false, error: "action must be vendors or vendor_invoices" };
+  const res = await fetch(`${base}${path}?${q}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(190_000) });
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { return { ok: false, status: res.status, raw: text.slice(0, 300) }; }
 }

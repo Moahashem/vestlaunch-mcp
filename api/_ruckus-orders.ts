@@ -8,7 +8,7 @@
  * Same auth as ruckus_send: the agent's forwarded bearer (= CRM CRON_SECRET).
  */
 
-export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman"] as const;
+export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman", "ruckus_jordan"] as const;
 export type OrderToolName = (typeof ORDER_TOOL_NAMES)[number];
 
 export function isOrderTool(name: string): name is OrderToolName {
@@ -109,12 +109,16 @@ ORDER_TOOLS.push(
       "propose {system: resman|appfolio|vestlaunch|paige, summary (ONE line: what will change), requestedBy (who asked), and EITHER instruction (resman/appfolio: the exact step with names, unit numbers, amounts, dates — one concrete change) " +
       "OR tool + args (vestlaunch: a VestLaunch tool name such as update_feature_request, update_contact, create_task, with its exact arguments), business?: ffl|cranbrook, chatId?} " +
       "→ an approval card with a code (A12) is posted; Mo or Yuliana replies 'approve A12' and code runs it and posts the result (✅/⚠️). paige = an extra Paige AP run now (no instruction needed). " +
-      "Tell the person the code and that it runs after approval; never say it's done before the result posts. list → recent requests and results.",
+      "Tell the person the code and that it runs after approval; never say it's done before the result posts. list → recent requests and results. " +
+      "preapprove {system: vestlaunch|paige, tool, business?, requestedBy} → asks Mo/Yuliana (its own approval card) for a STANDING OK so matching proposals run without asking each time; only routine record-keeping qualifies " +
+      "(update_feature_request, add_feature_request_note, create_task, update_task, add_note, add_tag, remove_tag, an extra Paige run) — never ResMan/AppFolio changes, money, owner records, messages or deletes. " +
+      "unpreapprove {code (the A# that granted it) or tool} ends one. standing → the ones that are on.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["propose", "list"] },
+        action: { type: "string", enum: ["propose", "list", "preapprove", "unpreapprove", "standing"] },
         system: { type: "string", enum: ["resman", "appfolio", "vestlaunch", "paige"] },
+        code: { type: "string" },
         summary: { type: "string" },
         instruction: { type: "string" },
         tool: { type: "string" },
@@ -148,6 +152,30 @@ ORDER_TOOLS.push(
       additionalProperties: false,
     },
   },
+  {
+    name: "ruckus_jordan",
+    description:
+      "Talk to Jordan, FFL's AI sales assistant and your coworker (she texts and emails landlord leads for Sam and knows each lead's conversation, drafts, consent and waits). " +
+      "ask {question, lead?: name or contact id} → her answer now (no lead → her whole pipeline: what's waiting on Sam, recent sends). " +
+      "tell {lead, text, by: who on the team said it, send?: true, replyToId?} → a team note she follows in every message to that lead for 30 days; with send: true she also writes and sends that lead a message now " +
+      "(consent, quiet hours, STOP and wait rules still apply; the result says sent, queued for their texting hours, or why not). Get Sam or Mo's OK before a send about price, terms or a promise. " +
+      "log {hours?} → what you and Jordan said to each other.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["ask", "tell", "log"] },
+        question: { type: "string" },
+        lead: { type: "string" },
+        text: { type: "string" },
+        by: { type: "string" },
+        send: { type: "boolean" },
+        replyToId: { type: "string" },
+        hours: { type: "number" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
 );
 
 function baseUrl(): string {
@@ -164,17 +192,23 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
   const action = typeof args.action === "string" ? args.action : "";
   if (name === "ruckus_resman") return runResman(args);
   if (name === "ruckus_action") {
-    if (action !== "propose" && action !== "list") throw new Error("ruckus_action: action must be propose or list");
-    args = { ...args, action: action === "propose" ? "propose_action" : "list_actions" };
+    const map: Record<string, string> = { propose: "propose_action", list: "list_actions", preapprove: "propose_standing", unpreapprove: "revoke_standing", standing: "list_standing" };
+    if (!map[action]) throw new Error("ruckus_action: action must be propose, list, preapprove, unpreapprove or standing");
+    args = { ...args, action: map[action] };
+    return runOrderTool("ruckus_schedule", args, forwardToken);
+  }
+  if (name === "ruckus_jordan") {
+    if (action !== "ask" && action !== "tell" && action !== "log") throw new Error("ruckus_jordan: action must be ask, tell or log");
+    args = { ...args, action: `jordan_${action}` };
     return runOrderTool("ruckus_schedule", args, forwardToken);
   }
   const allowed: Record<string, string[]> = {
-    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "propose_action", "list_actions"],
+    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "propose_action", "list_actions", "propose_standing", "revoke_standing", "list_standing", "jordan_ask", "jordan_tell", "jordan_log"],
     ruckus_memory: ["remember", "forget", "memories", "questionnaire", "profile_set", "profile_get"],
   };
   if (!allowed[name].includes(action)) throw new Error(`${name}: action must be one of ${allowed[name].join(", ")}`);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 55_000);
+  const timer = setTimeout(() => controller.abort(), String(args.action).startsWith("jordan_") ? 120_000 : 55_000);
   try {
     const res = await fetch(`${baseUrl()}/api/ringcentral/ruckus-schedule`, {
       method: "POST",

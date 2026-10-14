@@ -5,7 +5,7 @@ import { ORDER_TOOLS, isOrderTool, runOrderTool } from "../../api/_ruckus-orders
 describe("ruckus order tools", () => {
   afterEach(() => vi.unstubAllGlobals());
   it("exposes the tools, action required", () => {
-    expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman"]);
+    expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman", "ruckus_jordan"]);
     expect(isOrderTool("ruckus_schedule")).toBe(true);
     expect(isOrderTool("assistant_mail")).toBe(false);
     for (const t of ORDER_TOOLS) expect((t.inputSchema as { required?: string[] }).required).toEqual(["action"]);
@@ -53,5 +53,13 @@ describe("approved actions + ResMan reads (Mo 2026-10-14)", () => {
   });
   it("ruckus_resman is read only", () => {
     expect(ORDER_TOOLS.find((x) => x.name === "ruckus_resman")!.description).toMatch(/read only, no approval needed/);
+  });
+});
+
+describe("Ruckus ↔ Jordan (Mo 2026-10-14)", () => {
+  it("ruckus_jordan asks, tells and logs, and keeps Jordan's sending rules", () => {
+    const t = ORDER_TOOLS.find((x) => x.name === "ruckus_jordan")!;
+    expect((t.inputSchema.properties as Record<string, { enum?: string[] }>).action.enum).toEqual(["ask", "tell", "log"]);
+    expect(t.description).toMatch(/consent, quiet hours, STOP and wait rules still apply/);
   });
 });

@@ -32,3 +32,14 @@ describe("ruckus order tools", () => {
     await expect(runOrderTool("ruckus_schedule", { action: "remember" }, "tok")).rejects.toThrow(/action must be one of/);
   });
 });
+
+describe("ruckus tools v2 (10/13 build it all)", () => {
+  it("schedule tool knows watches and commitments", () => {
+    const s = ORDER_TOOLS[0];
+    expect((s.inputSchema as { properties: { action: { enum: string[] } } }).properties.action.enum).toContain("commitment");
+    expect((s.inputSchema as { properties: { kind: { enum: string[] } } }).properties.kind.enum).toContain("watch");
+    expect(s.description).toMatch(/ONE order with two times/);
+    expect(s.description).toMatch(/wakes you only on a NEW hit/);
+    expect(ORDER_TOOLS[1].description).toMatch(/until\?/);
+  });
+});

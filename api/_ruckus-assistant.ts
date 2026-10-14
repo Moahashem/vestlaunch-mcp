@@ -38,13 +38,15 @@ export const ASSISTANT_TOOLS = [
       "modify {change: archive|unarchive|trash|untrash|mark_read|mark_unread|star|unstar|add_label|remove_label, ids[] OR query, label?} — trash is recoverable for 30 days, never permanent; max 500 per call; " +
       "unsubscribe {ids[] OR query, trash?: true} — uses each sender's own unsubscribe (one-click or unsubscribe email), once per sender; senders that only offer a web page come back in needsAPerson with the link; " +
       "compose {to?, cc?, subject?, body, replyToId?, send?} — saves a DRAFT unless send: true; replyToId threads a reply to that message; " +
-      "save_attachment {id (message id), filename?, folderId?} — saves the email's attachment(s) into Drive. " +
+      "save_attachment {id (message id), filename?, folderId?} — saves the email's attachment(s) into Drive; " +
+      "send_draft {draftId} — sends a draft you saved earlier, only after the owner approved it ('send 1 and 3'). " +
+      "Triage ('stay on my inbox'): archive the noise, draft a reply for each one that needs the owner (compose without send), post them numbered with each draftId, ask 'send 1, 2, 3?'. " +
       "Example — 'unsubscribe me from advertising and delete it': action unsubscribe, query 'category:promotions', trash true; repeat while more is true.",
     inputSchema: {
       type: "object",
       properties: {
         mailbox: { type: "string", description: "The mailbox email, e.g. yuli@flatfeelandlord.com." },
-        action: { type: "string", enum: ["search", "read", "modify", "unsubscribe", "compose", "save_attachment"] },
+        action: { type: "string", enum: ["search", "read", "modify", "unsubscribe", "compose", "save_attachment", "send_draft"] },
         query: { type: "string", description: "Gmail search, for search / modify / unsubscribe." },
         max: { type: "integer", minimum: 1, maximum: 50 },
         id: { type: "string", description: "Message id, for read." },
@@ -63,6 +65,7 @@ export const ASSISTANT_TOOLS = [
         send: { type: "boolean", description: "true = send now. Default saves a draft." },
         filename: { type: "string", description: "save_attachment: which attachment (default all)." },
         folderId: { type: "string", description: "save_attachment: Drive folder to save into." },
+        draftId: { type: "string", description: "send_draft: the draft to send (from compose)." },
       },
       required: ["mailbox", "action"],
       additionalProperties: false,
@@ -79,12 +82,19 @@ export const ASSISTANT_TOOLS = [
       "update {eventId, + fields to change, notifyAttendees?}; " +
       "delete {eventId, notifyAttendees?}; " +
       "respond {eventId, response: accepted|declined|tentative}; " +
-      "free_busy {from?, to?}. Guests are only emailed when notifyAttendees is true.",
+      "free_busy {from?, to?}; " +
+      "find_time {mailboxes?: [other connected accounts that must also be free], durationMinutes (default 30), from?, to? (default next 7 days), dayStart?/dayEnd? (Houston hours, default 9–17), includeWeekends?} → common free slots; offer two or three, then create with attendees + notifyAttendees true. " +
+      "Reads cover every calendar the person has turned on; a bare date as 'to' means that whole day. Guests are only emailed when notifyAttendees is true.",
     inputSchema: {
       type: "object",
       properties: {
         mailbox: { type: "string" },
-        action: { type: "string", enum: ["list", "create", "update", "delete", "respond", "free_busy"] },
+        action: { type: "string", enum: ["list", "create", "update", "delete", "respond", "free_busy", "find_time"] },
+        mailboxes: { type: "array", items: { type: "string" }, description: "find_time: the other connected accounts whose calendars must be free." },
+        durationMinutes: { type: "integer", minimum: 15, maximum: 480 },
+        dayStart: { type: "number" },
+        dayEnd: { type: "number" },
+        includeWeekends: { type: "boolean" },
         from: { type: "string" },
         to: { type: "string" },
         query: { type: "string" },

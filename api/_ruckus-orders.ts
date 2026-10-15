@@ -111,7 +111,7 @@ ORDER_TOOLS.push(
       "→ an approval card with a code (A12) is posted; Mo or Yuliana replies 'approve A12' and code runs it and posts the result (✅/⚠️). paige = an extra Paige AP run now (no instruction needed). " +
       "Tell the person the code and that it runs after approval; never say it's done before the result posts. list → recent requests and results. " +
       "preapprove {system: vestlaunch|paige, tool, business?, requestedBy} → asks Mo/Yuliana (its own approval card) for a STANDING OK so matching proposals run without asking each time; only routine record-keeping qualifies " +
-      "(update_feature_request, add_feature_request_note, create_task, update_task, add_note, add_tag, remove_tag, an extra Paige run) — never ResMan/AppFolio changes, money, owner records, messages or deletes. " +
+      "(add_feature_request_note, create_task, update_task, add_note, an extra Paige run) — never ticket status/wording, tags, ResMan/AppFolio changes, money, owner records, messages or deletes. " +
       "unpreapprove {code (the A# that granted it) or tool} ends one. standing → the ones that are on.",
     inputSchema: {
       type: "object",
@@ -158,7 +158,7 @@ ORDER_TOOLS.push(
       "Talk to Jordan, FFL's AI sales assistant and your coworker (she texts and emails landlord leads for Sam and knows each lead's conversation, drafts, consent and waits). " +
       "ask {question, lead?: name or contact id} → her answer now (no lead → her whole pipeline: what's waiting on Sam, recent sends). " +
       "tell {lead, text, by: who on the team said it, send?: true, replyToId?} → a team note she follows in every message to that lead for 30 days; with send: true she also writes and sends that lead a message now " +
-      "(consent, quiet hours, STOP and wait rules still apply; the result says sent, queued for their texting hours, or why not). Get Sam or Mo's OK before a send about price, terms or a promise. " +
+      "(consent, quiet hours, STOP and wait rules still apply; the result says sent, queued for their texting hours, or why not). A send that mentions price, fees, discounts, free, refunds, contracts or terms is refused unless okBy names who OK'd it in chat (Sam or Mo). " +
       "log {hours?} → what you and Jordan said to each other.",
     inputSchema: {
       type: "object",
@@ -170,6 +170,7 @@ ORDER_TOOLS.push(
         by: { type: "string" },
         send: { type: "boolean" },
         replyToId: { type: "string" },
+        okBy: { type: "string" },
         hours: { type: "number" },
       },
       required: ["action"],

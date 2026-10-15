@@ -140,12 +140,16 @@ ORDER_TOOLS.push(
     description:
       "Read ResMan (Cranbrook Forest's accounting system) live — read only, no approval needed. vendors {term} → matching vendors (id, default GL, 1099). " +
       "vendor_invoices {vendor, start?: 'M/D/YYYY' (default 1/1/2025), end?: default today, number?: invoice #} → every invoice for that vendor in the range, ALL statuses incl. paid " +
-      "(number, dates, paid date, description, expense type, total, status). Takes about a minute; if Paige is mid-run it says to try again in ~10 minutes. " +
-      "Use it before saying whether an invoice is in ResMan, paid or open. Cranbrook data: post only in chats that may hear Cranbrook.",
+      "(number, dates, paid date, description, expense type, total, status). The date range filters on the ACCOUNTING date, which can differ from the invoice date " +
+      "(late invoices are booked to the current month), so to check specific invoices pass number and leave start/end at the defaults — never narrow the dates for that. " +
+      "Takes about a minute; if ResMan is busy (Paige or another read holds the login) it says so — that is not proof of anything, try again later. " +
+      "paige_status {} → instant, no ResMan login: whether Paige is running right now (and since when), and every invoice Paige or the entry tool logged today " +
+      "(vendor, #, amount, status, ResMan InvoiceID) plus open holds. Use it FIRST for 'did Paige enter X', 'is she done', 'what went in today'. " +
+      "Use these before saying whether an invoice is in ResMan, paid or open. Cranbrook data: post only in chats that may hear Cranbrook.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["vendors", "vendor_invoices"] },
+        action: { type: "string", enum: ["vendors", "vendor_invoices", "paige_status"] },
         term: { type: "string" },
         vendor: { type: "string" },
         start: { type: "string" },
@@ -248,7 +252,9 @@ async function runResman(args: Record<string, unknown>): Promise<unknown> {
     path = "/resman/vendor-invoices";
     if (!args.vendor) return { ok: false, error: "vendor is required" };
     for (const k of ["vendor", "start", "end", "number"]) if (args[k]) q.set(k, String(args[k]));
-  } else return { ok: false, error: "action must be vendors or vendor_invoices" };
+  } else if (action === "paige_status") {
+    path = "/paige/status";
+  } else return { ok: false, error: "action must be vendors, vendor_invoices or paige_status" };
   const res = await fetch(`${base}${path}?${q}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(190_000) });
   const text = await res.text();
   try { return JSON.parse(text); } catch { return { ok: false, status: res.status, raw: text.slice(0, 300) }; }

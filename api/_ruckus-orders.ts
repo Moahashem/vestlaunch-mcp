@@ -108,7 +108,10 @@ ORDER_TOOLS.push(
       "Do something that needs a person's OK (Mo 2026-10-14: take action in ResMan, AppFolio, VestLaunch 'so long as it gets explicit approval'). " +
       "propose {system: resman|appfolio|vestlaunch|paige, summary (ONE line: what will change), requestedBy (who asked), and EITHER instruction (resman/appfolio: the exact step with names, unit numbers, amounts, dates — one concrete change) " +
       "OR tool + args (vestlaunch: a VestLaunch tool name such as update_feature_request, update_contact, create_task, with its exact arguments), business?: ffl|cranbrook, chatId?} " +
-      "→ an approval card with a code (A12) is posted; Mo or Yuliana replies 'approve A12' and code runs it and posts the result (✅/⚠️). paige = an extra Paige AP run now (no instruction needed). " +
+      "→ an approval card with a code (A12) is posted; Mo or Yuliana replies 'approve A12' and code runs it and posts the result (✅/⚠️). " +
+      "paige = tell Paige (the AP invoice agent) something and start her run now: instruction = exactly what she should do, naming the vendor and every invoice number/amount/GL it releases " +
+      "(empty = just an extra run under her normal rules); quote = the person's message copied EXACTLY. When Mo or Yuliana asked for it in their own words, code checks the quote is really " +
+      "their recent post and runs it at once with no approval card (never ask them to type 'approve' or a special phrase for something they just asked for). " +
       "Tell the person the code and that it runs after approval; never say it's done before the result posts. list → recent requests and results. " +
       "preapprove {system: vestlaunch|paige, tool, business?, requestedBy} → asks Mo/Yuliana (its own approval card) for a STANDING OK so matching proposals run without asking each time; only routine record-keeping qualifies " +
       "(add_feature_request_note, create_task, update_task, add_note, an extra Paige run) — never ticket status/wording, tags, ResMan/AppFolio changes, money, owner records, messages or deletes. " +
@@ -126,6 +129,7 @@ ORDER_TOOLS.push(
         business: { type: "string", enum: ["ffl", "cranbrook"] },
         requestedBy: { type: "string" },
         chatId: { type: "string" },
+        quote: { type: "string", description: "propose (paige): the asker's message copied exactly, so code can verify a direct ask from Mo or Yuliana." },
       },
       required: ["action"],
       additionalProperties: false,

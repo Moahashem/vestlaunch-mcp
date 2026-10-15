@@ -33,13 +33,16 @@ export const ORDER_TOOLS = [
       "report {id, summary, state?, failed?, error?} — call this at the END of every scheduled run you are given: summary = what you posted in one or two lines, " +
       "state = a small JSON object of what the next run needs (ids or titles already mentioned, the time you covered through). " +
       "commitment {what, owner (a person), due 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM' Houston, chatId, requestedBy (who it was promised to)} — someone promised something by a date: logs a ledger item under the owner and chases THEM in that chat when due; use it for delegation too ('have Sergio…' → do it, then log the commitment). " +
+      "ledger_close {seq, quote, chatId, note?} — the owner of a ledger item (or Mo/Yuliana) just posted the outcome that finishes it: close it yourself instead of asking them to type 'done #N'. quote = their message copied exactly; code checks it is their recent post and that they own the item; 'undo #N' reopens it. " +
       "huddle_undo {n, reason?, by} — a churn-list update landed on the wrong owner or was wrong: restores the board status, marks its contact notes VOID, reopens the churn item; people can also just type 'undo #2' in chat. " +
       "A shared chat (people beyond Mo and Yuliana) refuses orders that touch email, calendar, money or people matters — relay the reason and offer the main chat. " +
       "A scheduled run may do what you may do live in chat; it must not send email, delete, or message a renter or owner unless its instruction says so.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo"] },
+        action: { type: "string", enum: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "ledger_close"] },
+        quote: { type: "string", description: "ledger_close: the owner's message copied exactly." },
+        note: { type: "string", description: "ledger_close: one line of what happened." },
         n: { type: "integer", description: "huddle_undo: the number on today's churn list (1-99)." },
         reason: { type: "string", description: "huddle_undo: why, in a few words (goes on the VOID note)." },
         kind: { type: "string", enum: ["recurring", "once", "watch"] },
@@ -57,7 +60,7 @@ export const ORDER_TOOLS = [
         business: { type: "string", enum: ["ffl", "cranbrook", "both"] },
         requestedBy: { type: "string", description: "create: the person who asked (never an agent)." },
         by: { type: "string", description: "update / pause / cancel: who asked for the change." },
-        seq: { type: "integer", description: "The order's # (from list or create)." },
+        seq: { type: "integer", description: "The order's # (from list or create); ledger_close: the ledger item's #." },
         id: { type: "string", description: "The order's id (report uses the id given in the run prompt)." },
         includeInactive: { type: "boolean" },
         summary: { type: "string", description: "report: what you posted, one or two lines." },
@@ -212,7 +215,7 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
     return runOrderTool("ruckus_schedule", args, forwardToken);
   }
   const allowed: Record<string, string[]> = {
-    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "propose_action", "list_actions", "propose_standing", "revoke_standing", "list_standing", "jordan_ask", "jordan_tell", "jordan_log"],
+    ruckus_schedule: ["create", "list", "update", "pause", "resume", "cancel", "run_now", "report", "commitment", "huddle_undo", "ledger_close", "propose_action", "list_actions", "propose_standing", "revoke_standing", "list_standing", "jordan_ask", "jordan_tell", "jordan_log"],
     ruckus_memory: ["remember", "forget", "memories", "questionnaire", "profile_set", "profile_get"],
   };
   if (!allowed[name].includes(action)) throw new Error(`${name}: action must be one of ${allowed[name].join(", ")}`);

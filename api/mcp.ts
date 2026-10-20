@@ -1688,6 +1688,62 @@ async function getFflHuddleAppfolio(cfg: Cfg): Promise<unknown> {
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-huddle-appfolio" };
 }
 
+// --- SMART TOOL: appfolio_ledger ---
+// Ruckus 2026-10-20: "owner charges reach me as a total only" + "tenant charges leave out
+// moved out tenants". Wraps ffl-crm GET /api/v1/appfolio/ledger: owner bills by GL
+// (bill_detail) + resident charges for EVERY tenant status (charge_detail). READ-ONLY.
+const AF_LEDGER_TOOL_NAME = "appfolio_ledger";
+const AF_LEDGER_TOOL_DESC =
+  "AppFolio fee and charge lookup (READ-ONLY). Use it to answer 'how much / how many of fee X " +
+  "were charged to owners or residents in a period', e.g. 'how many postage fees were charged " +
+  "back to residents and owners this month?'. Owner side = AppFolio bills on owner ledgers by GL " +
+  "account (5xxx = fees FFL bills owners: 5008 Mail / Shipping = postage at $7.20, 5070 Management " +
+  "Fees, 5075 Leasing Fee, 5510 Repairs, 5650 Maintenance Coordination; 3030 = owner distributions; " +
+  "3020 = owner contributions) plus owner contributions. Resident side = every tenant charge " +
+  "INCLUDING moved out residents. Returns totals by GL per side (count, amount, paid; always " +
+  "complete; count/amount = charges, refund_count/refund_amount = fees FFL credited back to the owner, " +
+  "net_amount = what stuck) and the newest matching lines (date, side, kind, property, payer/payee, GL, " +
+  "description, amount, paid). Filter with gl (GL number like '5008' or a GL name word) and/or q (word match " +
+  "on description or GL name; use '|' for alternatives, e.g. 'postage|mail|certified'). " +
+  "Default period = this month to date (Central). Zero matching lines means none were charged. " +
+  "Source = /api/v1/appfolio/ledger.";
+const AF_LEDGER_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    from: { type: "string" as const, description: "Start date YYYY-MM-DD. Default: first of this month." },
+    to: { type: "string" as const, description: "End date YYYY-MM-DD. Default: today. Max range 366 days." },
+    side: { type: "string" as const, enum: ["owner", "tenant", "both"], description: "owner, tenant (residents) or both (default)." },
+    gl: { type: "string" as const, description: "GL account number ('5008') or GL name word ('mail'); '|' separates alternatives." },
+    q: { type: "string" as const, description: "Word match on description or GL name, e.g. 'postage|mail|certified'." },
+    property: { type: "string" as const, description: "Text match on the property name/address." },
+    group_by: { type: "string" as const, enum: ["gl", "property", "none"], description: "Totals by GL (default, always included) or also by property." },
+    limit: { type: "integer" as const, description: "Max lines returned (default 50, max 500; 0 = totals only)." },
+  },
+  additionalProperties: false,
+};
+
+async function getAppfolioLedger(cfg: Cfg, rawArgs: Record<string, unknown>): Promise<unknown> {
+  const qs = new URLSearchParams();
+  for (const k of ["from", "to", "side", "gl", "q", "property", "group_by"]) {
+    const v = rawArgs[k];
+    if (typeof v === "string" && v.trim()) qs.set(k, v.trim());
+  }
+  if (typeof rawArgs.limit === "number" && Number.isFinite(rawArgs.limit)) qs.set("limit", String(Math.trunc(rawArgs.limit)));
+  const path = "/api/v1/appfolio/ledger" + (qs.toString() ? `?${qs}` : "");
+  const resp = await crmRequest<Record<string, unknown>>(cfg, "GET", path);
+  if (!resp.success) {
+    throw new Error(
+      `appfolio ledger endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
+        "Requires GET /api/v1/appfolio/ledger deployed and a key with properties:read.",
+    );
+  }
+  const d = resp.data;
+  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).totals !== "object") {
+    throw new Error("appfolio ledger endpoint returned an unexpected shape (no totals).");
+  }
+  return d;
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -1752,6 +1808,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
   const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
+  const includeAfLedgerTool = !toolFilter || toolFilter.has(AF_LEDGER_TOOL_NAME);
   // report_run_complete writes to the hub via the server's own key, so it is
   // exposed only to callers whose OWN key carries agent:write (or *).
   const includeRunCompleteTool =
@@ -1840,6 +1897,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeHudAfTool
         ? [{ name: FFL_HUDAF_TOOL_NAME, description: FFL_HUDAF_TOOL_DESC, inputSchema: FFL_HUDAF_TOOL_SCHEMA }]
+        : []),
+      ...(includeAfLedgerTool
+        ? [{ name: AF_LEDGER_TOOL_NAME, description: AF_LEDGER_TOOL_DESC, inputSchema: AF_LEDGER_TOOL_SCHEMA }]
         : []),
       ...(includeRunCompleteTool
         ? [{ name: RUN_COMPLETE_TOOL_NAME, description: RUN_COMPLETE_TOOL_DESC, inputSchema: RUN_COMPLETE_TOOL_SCHEMA }]
@@ -2239,6 +2299,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_HUDDLE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === AF_LEDGER_TOOL_NAME) {
+      if (!includeAfLedgerTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await getAppfolioLedger(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${AF_LEDGER_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

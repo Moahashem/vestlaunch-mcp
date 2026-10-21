@@ -1744,6 +1744,68 @@ async function getAppfolioLedger(cfg: Cfg, rawArgs: Record<string, unknown>): Pr
   return d;
 }
 
+// --- SMART TOOL: owner_billing ---
+// Mo 2026-10-20: the weekly owner billing audit lives on VestLaunch Ops › Owner Billing; the team
+// can tell Ruckus "don't charge X" instead of clicking. Wraps ffl-crm /api/v1/owner-billing.
+// Never touches AppFolio: list reads the latest run; dont_charge / undo only change the list.
+const OWNER_BILLING_TOOL_NAME = "owner_billing";
+const OWNER_BILLING_TOOL_DESC =
+  "FFL owner billing list (the weekly audit of owner fees vs management agreements; same list as " +
+  "VestLaunch Ops > Owner Billing). action=list: open items to bill / credit / decide / fix, filtered " +
+  "by q (address words) and bucket (missed=to bill, overcharge=to credit, exit=early exits to decide, " +
+  "cleanup=fix in AppFolio); decided=true lists 'don't charge' decisions instead. " +
+  "action=dont_charge: take an item off the list for good. Needs item_id (from list), reason (short, " +
+  "e.g. 'Owner's agreement is different', 'Already billed another way', 'Courtesy, we're waiving it', " +
+  "'Insurance or special project', 'Not our charge', or 'Other' with a note) and by (who asked). " +
+  "scope='item' (just this item, default) or 'home' (never flag this kind of charge on this home again). " +
+  "Only do this when a person in the chat clearly asked; confirm back what was removed. " +
+  "action=undo: put a decision back (decision_id from list with decided=true). Billing needs no action: " +
+  "items drop off on the next run once AppFolio shows the charge. Never changes AppFolio.";
+const OWNER_BILLING_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    action: { type: "string" as const, enum: ["list", "dont_charge", "undo"], description: "list (default), dont_charge or undo." },
+    q: { type: "string" as const, description: "list: address words, e.g. 'marshall pond'." },
+    bucket: { type: "string" as const, enum: ["missed", "overcharge", "exit", "cleanup"], description: "list: one section only." },
+    decided: { type: "boolean" as const, description: "list: show don't charge decisions instead of open items." },
+    limit: { type: "integer" as const, description: "list: max rows (default 30, max 200)." },
+    item_id: { type: "string" as const, description: "dont_charge: the item_id from list." },
+    scope: { type: "string" as const, enum: ["item", "home"], description: "dont_charge: item (default) or home." },
+    reason: { type: "string" as const, description: "dont_charge: why (required)." },
+    note: { type: "string" as const, description: "dont_charge: optional detail; required when reason is Other." },
+    decision_id: { type: "string" as const, description: "undo: the decision_id from list with decided=true." },
+    by: { type: "string" as const, description: "dont_charge / undo: the person who asked (first name)." },
+  },
+  additionalProperties: false,
+};
+
+async function ownerBilling(cfg: Cfg, a: Record<string, unknown>): Promise<unknown> {
+  const str = (k: string) => (typeof a[k] === "string" && (a[k] as string).trim() ? (a[k] as string).trim() : undefined);
+  const action = str("action") ?? "list";
+  let resp: ApiResp<Record<string, unknown>>;
+  if (action === "list") {
+    const qs = new URLSearchParams();
+    for (const k of ["q", "bucket"]) { const v = str(k); if (v) qs.set(k, v); }
+    if (a.decided === true) qs.set("decided", "1");
+    if (typeof a.limit === "number" && Number.isFinite(a.limit)) qs.set("limit", String(Math.trunc(a.limit)));
+    resp = await crmRequest<Record<string, unknown>>(cfg, "GET", "/api/v1/owner-billing" + (qs.toString() ? `?${qs}` : ""));
+  } else if (action === "dont_charge") {
+    if (!str("item_id") || !str("reason")) throw new Error("dont_charge needs item_id and reason.");
+    resp = await crmRequest<Record<string, unknown>>(cfg, "POST", "/api/v1/owner-billing", undefined, {
+      item_id: str("item_id"), scope: str("scope") ?? "item", reason: str("reason"), note: str("note"), by: str("by"),
+    });
+  } else if (action === "undo") {
+    if (!str("decision_id")) throw new Error("undo needs decision_id.");
+    const qs = new URLSearchParams({ decision_id: str("decision_id")! });
+    if (str("by")) qs.set("by", str("by")!);
+    resp = await crmRequest<Record<string, unknown>>(cfg, "DELETE", `/api/v1/owner-billing?${qs}`);
+  } else {
+    throw new Error("action must be list, dont_charge or undo.");
+  }
+  if (!resp.success) throw new Error(`owner billing endpoint failed (HTTP ${resp.statusCode}): ${resp.error}`);
+  return resp.data;
+}
+
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
 async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
@@ -1809,6 +1871,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
   const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
   const includeAfLedgerTool = !toolFilter || toolFilter.has(AF_LEDGER_TOOL_NAME);
+  const includeOwnerBillingTool = !toolFilter || toolFilter.has(OWNER_BILLING_TOOL_NAME);
   // report_run_complete writes to the hub via the server's own key, so it is
   // exposed only to callers whose OWN key carries agent:write (or *).
   const includeRunCompleteTool =
@@ -1900,6 +1963,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         : []),
       ...(includeAfLedgerTool
         ? [{ name: AF_LEDGER_TOOL_NAME, description: AF_LEDGER_TOOL_DESC, inputSchema: AF_LEDGER_TOOL_SCHEMA }]
+        : []),
+      ...(includeOwnerBillingTool
+        ? [{ name: OWNER_BILLING_TOOL_NAME, description: OWNER_BILLING_TOOL_DESC, inputSchema: OWNER_BILLING_TOOL_SCHEMA }]
         : []),
       ...(includeRunCompleteTool
         ? [{ name: RUN_COMPLETE_TOOL_NAME, description: RUN_COMPLETE_TOOL_DESC, inputSchema: RUN_COMPLETE_TOOL_SCHEMA }]
@@ -2299,6 +2365,23 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         return {
           content: [
             { type: "text", text: `Error invoking ${FFL_HUDDLE_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (name === OWNER_BILLING_TOOL_NAME) {
+      if (!includeOwnerBillingTool) {
+        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+      }
+      try {
+        const result = await ownerBilling(cfg, (rawArgs ?? {}) as Record<string, unknown>);
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } catch (err) {
+        return {
+          content: [
+            { type: "text", text: `Error invoking ${OWNER_BILLING_TOOL_NAME}: ${err instanceof Error ? err.message : String(err)}` },
           ],
           isError: true,
         };

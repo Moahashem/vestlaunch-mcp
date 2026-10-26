@@ -53,6 +53,25 @@ export const WATCHED_AGENT_KEYS = [
   "onboarding",
 ] as const;
 
+/**
+ * Agents that ALWAYS report WORK COMPLETE (all six call report_run_complete
+ * since Sep 2026). For these the guard no longer self-calibrates from the last
+ * 7 days: before 2026-10-26 a week-long outage would have silenced the guard on
+ * day 8, because "completion-enabled" was inferred from a completion row inside
+ * the 7-day window. (Found after the 10/24–10/26 Cranbrook 403 outage.)
+ */
+export const COMPLETION_REQUIRED: ReadonlySet<string> = new Set(WATCHED_AGENT_KEYS);
+
+/** Plain-words name of each agent's part of the Company Numbers sheet (Mo reads these). */
+export const AGENT_LABELS: Record<string, string> = {
+  "sales-lead-count": "FFL sales numbers (rows 26–29)",
+  occupancy: "FFL AppFolio numbers (occupancy, renewals, delinquency)",
+  showmojo: "FFL ShowMojo listings (row 20, A40–A44)",
+  "cranbrook-cfa": "Cranbrook ResMan numbers (rows 5, 10, 15, 16, 37, 38)",
+  "cranbrook-cf-leads": "Cranbrook leads (row 35)",
+  onboarding: "owner onboarding roster (rows 49–79)",
+};
+
 interface HubRun {
   status?: unknown;
   summary?: unknown;
@@ -65,33 +84,76 @@ export interface AgentVerdict {
   failedToday: number;
   completeToday: boolean;
   completionEnabled: boolean;
+  /** Consecutive days BEFORE today with no WORK COMPLETE (0 = yesterday was fine). Capped at 6. */
+  missedDaysBefore: number;
   alert: string | null;
+}
+
+/** YYYY-MM-DD of an instant in America/Chicago. */
+export function chicagoDay(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+/**
+ * Consecutive Chicago days immediately before `now`'s day with no WORK
+ * COMPLETE row in `weekRows`. Days are walked back one at a time (noon-anchored
+ * so a DST change can't skip or repeat a day), up to 6.
+ */
+export function countMissedDaysBefore(weekRows: HubRun[], now: Date = new Date()): number {
+  const completeDays = new Set<string>();
+  for (const r of weekRows) {
+    if (typeof r.summary !== "string" || !r.summary.startsWith(WORK_COMPLETE_PREFIX)) continue;
+    const t = typeof r.ranAt === "string" || r.ranAt instanceof Date ? new Date(r.ranAt as string) : null;
+    if (t && !Number.isNaN(t.getTime())) completeDays.add(chicagoDay(t));
+  }
+  const today = chicagoDay(now);
+  // Noon on today's Chicago date, expressed in UTC (Chicago is UTC-5/-6, so 17:00Z is always that day's daytime).
+  const anchor = new Date(`${today}T17:00:00Z`);
+  let missed = 0;
+  for (let i = 1; i <= 6; i++) {
+    const day = chicagoDay(new Date(anchor.getTime() - i * 24 * 3600 * 1000));
+    if (completeDays.has(day)) break;
+    missed++;
+  }
+  return missed;
 }
 
 /**
  * Pure decision logic (unit-tested): classify one agent's day from its hub
- * rows. `todayRows` = all rows since local midnight; `weekRows` = ok rows for
- * the last 7 days (used only to detect completion-enabled agents).
+ * rows. `todayRows` = all rows since local midnight; `weekRows` = rows for the
+ * last 7 days (completion detection for non-required agents + the missed-day streak).
  */
 export function judgeAgent(
   agentKey: string,
   todayRows: HubRun[],
   weekRows: HubRun[],
+  now: Date = new Date(),
 ): AgentVerdict {
   const isComplete = (r: HubRun) =>
     typeof r.summary === "string" && r.summary.startsWith(WORK_COMPLETE_PREFIX);
   const okToday = todayRows.filter((r) => r.status === "ok");
   const failedToday = todayRows.filter((r) => r.status === "failed").length;
   const completeToday = todayRows.some(isComplete);
-  const completionEnabled = weekRows.some(isComplete);
+  const completionEnabled = COMPLETION_REQUIRED.has(agentKey) || weekRows.some(isComplete);
+  const missedDaysBefore = countMissedDaysBefore(weekRows, now);
+
+  const label = AGENT_LABELS[agentKey] ? `${AGENT_LABELS[agentKey]} [${agentKey}]` : agentKey;
+  const streak = missedDaysBefore > 0
+    ? ` — ${missedDaysBefore + 1} days in a row${missedDaysBefore >= 6 ? " or more" : ""}`
+    : "";
 
   let alert: string | null = null;
   if (okToday.length === 0) {
-    alert = `${agentKey}: NEVER KICKED OFF today (no ok run-status rows) — check the Vercel cron`;
+    alert = `${label}: NEVER KICKED OFF today (no ok run-status rows) — check the Vercel cron${completeToday ? "" : streak}`;
   } else if (!completeToday && failedToday > 0) {
-    alert = `${agentKey}: ${failedToday} failed run(s) today and no ${WORK_COMPLETE_PREFIX} — check the sheet rows`;
+    alert = `${label}: ${failedToday} failed run(s) today and no ${WORK_COMPLETE_PREFIX} — check the sheet rows${streak}`;
   } else if (!completeToday && completionEnabled) {
-    alert = `${agentKey}: no ${WORK_COMPLETE_PREFIX} today (retry window closed) — its sheet rows are probably blank`;
+    alert = `${label}: no ${WORK_COMPLETE_PREFIX} today (retry window closed) — its sheet rows are probably blank${streak}`;
   }
 
   return {
@@ -100,6 +162,7 @@ export function judgeAgent(
     failedToday,
     completeToday,
     completionEnabled,
+    missedDaysBefore,
     alert,
   };
 }
@@ -168,15 +231,38 @@ async function sendRingCentral(text: string): Promise<{ sent: boolean; detail?: 
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ text }),
+      // Main channel (Mo + Yuliana) hears both businesses; say so explicitly so the
+      // chat policy never holds a Cranbrook line.
+      body: JSON.stringify({ text, chat: "main", business: ["ffl", "cranbrook"] }),
       signal: controller.signal,
     });
-    return res.ok ? { sent: true } : { sent: false, detail: `HTTP ${res.status}` };
+    let body: { ok?: unknown; held?: unknown; error?: unknown } = {};
+    try {
+      body = (await res.json()) as typeof body;
+    } catch {
+      /* non-JSON reply — judge by status alone */
+    }
+    if (body.held === true) {
+      return { sent: false, detail: `held by chat policy: ${String(body.error ?? "")}`.slice(0, 200) };
+    }
+    if (!res.ok || body.ok === false) {
+      return { sent: false, detail: `HTTP ${res.status}${body.error ? ` ${String(body.error)}` : ""}`.slice(0, 200) };
+    }
+    return { sent: true };
   } catch (err) {
     return { sent: false, detail: err instanceof Error ? err.message : String(err) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The RingCentral text (pure; unit-tested). Plain words first, the technical detail after. */
+export function composeAlert(problems: string[]): string {
+  return [
+    `🔴 Morning numbers: ${problems.length === 1 ? "one part" : `${problems.length} parts`} of today's Company Numbers sheet did not fill in.`,
+    ...problems.map((p) => `• ${p}`),
+    "The sheet's alert cells (A100–A122) say why. Mission Control: https://crm.vestlaunch.com/agent-os/daily",
+  ].join("\n");
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -222,16 +308,17 @@ export default async function handler(
 
   let rc: { sent: boolean; detail?: string } = { sent: false, detail: "no alerts" };
   if (problems.length > 0) {
-    const msg = [
-      "⚠️ FLEET STALENESS GUARD — the morning retry window has closed with problems:",
-      ...problems.map((p) => `• ${p}`),
-      "Check the Company Numbers sheet status ledger (A100–A122) and /agent-os/daily.",
-    ].join("\n");
-    rc = await sendRingCentral(msg);
+    rc = await sendRingCentral(composeAlert(problems));
+    const delivery = rc.sent ? "RingCentral: posted to main chat" : `RingCentral: NOT delivered (${rc.detail ?? "unknown"})`;
+    console.log(`[fleet-staleness] ${problems.length} problem(s); ${delivery}`);
     await logAgentRun({
       agentKey: AGENT_KEY,
       status: "failed",
-      summary: `fleet-staleness: ${problems.length} problem(s): ${problems.join(" | ").slice(0, 600)}`,
+      // Red, not the default green: a blank section of the morning sheet is a
+      // human-needed failure (the 10/24–10/26 alerts were logged green and sat unseen).
+      tier: "red",
+      summary: `fleet-staleness: ${problems.length} problem(s): ${problems.join(" | ").slice(0, 560)} · ${delivery}`.slice(0, 700),
+      errorMessage: rc.sent ? undefined : delivery,
       needsHuman: true,
     });
   } else {

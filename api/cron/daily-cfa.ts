@@ -57,7 +57,7 @@ const DEFAULT_PROMPT = [
   "create it — if it is missing, STOP and report. Check your status cell A112 first; if",
   "today is already done, report it complete (see FINAL STEP) and stop. Apply every gate: if stale=true write NOTHING and",
   "alert; skip null cells. Then write your cells per your write recipe (B5/F5/G5/H5,",
-  "B10:F10, B15, D15 and B16 — never C15/E15/F15) plus status A112. Read back everything you",
+  "B10:F10, B15, D15, E15 (evictions = leases under eviction) and B16 — never C15/F15) plus status A112. Read back everything you",
   "wrote and report exactly what was written and skipped.",
   "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
   "or verified already done), call report_run_complete with agent_key 'cranbrook-cfa' and a one-line",

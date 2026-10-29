@@ -8,7 +8,7 @@
  * Same auth as ruckus_send: the agent's forwarded bearer (= CRM CRON_SECRET).
  */
 
-export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman", "ruckus_jordan"] as const;
+export const ORDER_TOOL_NAMES = ["ruckus_schedule", "ruckus_memory", "ruckus_action", "ruckus_resman", "ruckus_jordan", "ruckus_booking"] as const;
 export type OrderToolName = (typeof ORDER_TOOL_NAMES)[number];
 
 export function isOrderTool(name: string): name is OrderToolName {
@@ -188,6 +188,44 @@ ORDER_TOOLS.push(
       additionalProperties: false,
     },
   },
+  {
+    name: "ruckus_booking",
+    description:
+      "Booking hours on VestLaunch's booking pages (onboarding calls, consultations) — read and change them yourself; never send anyone to Settings. " +
+      "Reads (anyone): get {person} → their weekly hours, days off / special dates ahead, the clock the hours are in, pages they host; pages {} → every team page with hosts and rules; " +
+      "open_slots {page, days?: 1-14} → the next open times in Central (run it after a change to confirm it shows). " +
+      "Changes: set_day {person, day, hours: '9am-12pm, 1pm-5pm'} or {person, day, off: true}; set_weekly {person, weekly: [{day, hours} | {day, off: true}]} (days left out are off); " +
+      "block_dates {person, date: 'YYYY-MM-DD', to?, reason?} (a day or range off, max 60 days); set_date_hours {person, date, hours: '10am-2pm', reason?} (one window); " +
+      "clear_dates {person, date, to?} (back to normal hours); set_timezone {person, timezone: 'Central'}; add_host / remove_host {page, person}; " +
+      "page_settings {page, changes: {minNoticeMins, maxAdvanceDays, maxPerDay, bufferBefore, bufferAfter, slotInterval, duration}}. " +
+      "Every change needs requestedBy, chatId and quote (their message copied exactly). Code decides: a person's own hours run at once on their own ask; " +
+      "Mo or Yuliana: anything runs at once; otherwise you get { ran: false, pending: 'A12' } — tell them it waits for Mo or Yuliana's approval. " +
+      "Times like '9am' are on the person's own clock (Sam = Central); bare '9' is refused (am or pm?). Guests see times in their own zone. " +
+      "A change returns outsideHours: upcoming bookings that no longer fit — name them and ask if they should be moved; never move or cancel one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["get", "pages", "open_slots", "set_day", "set_weekly", "block_dates", "set_date_hours", "clear_dates", "set_timezone", "add_host", "remove_host", "page_settings"] },
+        person: { type: "string", description: "Name or email, e.g. 'Sam'." },
+        page: { type: "string", description: "Team page name or slug, e.g. 'onboarding'." },
+        day: { type: "string" },
+        hours: { type: "string" },
+        off: { type: "boolean" },
+        weekly: { type: "array", items: { type: "object", additionalProperties: true } },
+        date: { type: "string", description: "YYYY-MM-DD" },
+        to: { type: "string", description: "YYYY-MM-DD, inclusive" },
+        reason: { type: "string" },
+        timezone: { type: "string" },
+        changes: { type: "object", additionalProperties: true },
+        days: { type: "integer", minimum: 1, maximum: 14 },
+        requestedBy: { type: "string", description: "The person who asked (never an agent)." },
+        chatId: { type: "string", description: "The chat it was asked in (id from your kickoff prompt, or 'main')." },
+        quote: { type: "string", description: "Their message, copied exactly." },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
 );
 
 function baseUrl(): string {
@@ -203,6 +241,7 @@ export async function runOrderTool(name: OrderToolName, args: Record<string, unk
   if (!token) throw new Error("Not configured: RUCKUS_SEND_TOKEN (= CRM CRON_SECRET) is missing.");
   const action = typeof args.action === "string" ? args.action : "";
   if (name === "ruckus_resman") return runResman(args);
+  if (name === "ruckus_booking") return relay("/api/ringcentral/ruckus-booking", args, token, 55_000);
   if (name === "ruckus_action") {
     const map: Record<string, string> = { propose: "propose_action", list: "list_actions", preapprove: "propose_standing", unpreapprove: "revoke_standing", standing: "list_standing" };
     if (!map[action]) throw new Error("ruckus_action: action must be propose, list, preapprove, unpreapprove or standing");
@@ -261,4 +300,26 @@ async function runResman(args: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(`${base}${path}?${q}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(190_000) });
   const text = await res.text();
   try { return JSON.parse(text); } catch { return { ok: false, status: res.status, raw: text.slice(0, 300) }; }
+}
+
+/** POST to a CRM Ruckus endpoint with the forwarded bearer; JSON back (or the raw text). */
+async function relay(path: string, args: Record<string, unknown>, token: string, ms: number): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(`${baseUrl()}${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "ruckus-mcp-http/0.1.0" },
+      body: JSON.stringify(args),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { ok: res.ok, status: res.status, raw: text.slice(0, 500) };
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -199,6 +199,7 @@ ORDER_TOOLS.push(
       "block_dates {person, date: 'YYYY-MM-DD', to?, reason?} (a day or range off, max 60 days); set_date_hours {person, date, hours: '10am-2pm', reason?} (one window); " +
       "clear_dates {person, date, to?} (back to normal hours); set_timezone {person, timezone: 'Central'}; add_host / remove_host {page, person}; " +
       "page_settings {page, changes: {minNoticeMins, maxAdvanceDays, maxPerDay, bufferBefore, bufferAfter, slotInterval, duration}}. " +
+      "Company holidays (Employee Handbook list, closed on every page except Cranbrook tours): holidays {} lists them; add_closure {date, reason} / remove_closure {date} (Mo or Yuliana). " +
       "Every change needs requestedBy, chatId and quote (their message copied exactly). Code decides: a person's own hours run at once on their own ask; " +
       "Mo or Yuliana: anything runs at once; otherwise you get { ran: false, pending: 'A12' } — tell them it waits for Mo or Yuliana's approval. " +
       "Times like '9am' are on the person's own clock (Sam = Central); bare '9' is refused (am or pm?). Guests see times in their own zone. " +
@@ -206,7 +207,7 @@ ORDER_TOOLS.push(
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["get", "pages", "open_slots", "set_day", "set_weekly", "block_dates", "set_date_hours", "clear_dates", "set_timezone", "add_host", "remove_host", "page_settings"] },
+        action: { type: "string", enum: ["get", "pages", "open_slots", "holidays", "set_day", "set_weekly", "block_dates", "set_date_hours", "clear_dates", "set_timezone", "add_host", "remove_host", "page_settings", "add_closure", "remove_closure"] },
         person: { type: "string", description: "Name or email, e.g. 'Sam'." },
         page: { type: "string", description: "Team page name or slug, e.g. 'onboarding'." },
         day: { type: "string" },

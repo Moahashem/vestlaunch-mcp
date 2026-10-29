@@ -193,7 +193,8 @@ ORDER_TOOLS.push(
     description:
       "Booking hours on VestLaunch's booking pages (onboarding calls, consultations) — read and change them yourself; never send anyone to Settings. " +
       "Reads (anyone): get {person} → their weekly hours, days off / special dates ahead, the clock the hours are in, pages they host; pages {} → every team page with hosts and rules; " +
-      "open_slots {page, days?: 1-14} → the next open times in Central (run it after a change to confirm it shows). " +
+      "open_slots {page, days?: 1-14} → the next open times in Central — a team page ('onboarding') or a person's own page type ('sam/homepage-consultation', listed by get); run it after a change to confirm it shows. " +
+      "When a page host says THEY are out, update their hours in the same turn: block_dates for whole days only, set_date_hours for part of a day; about someone else, confirm with that person first. " +
       "Changes: set_day {person, day, hours: '9am-12pm, 1pm-5pm'} or {person, day, off: true}; set_weekly {person, weekly: [{day, hours} | {day, off: true}]} (days left out are off); " +
       "block_dates {person, date: 'YYYY-MM-DD', to?, reason?} (a day or range off, max 60 days); set_date_hours {person, date, hours: '10am-2pm', reason?} (one window); " +
       "clear_dates {person, date, to?} (back to normal hours); set_timezone {person, timezone: 'Central'}; add_host / remove_host {page, person}; " +

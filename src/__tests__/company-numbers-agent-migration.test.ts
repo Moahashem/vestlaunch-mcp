@@ -1,0 +1,14 @@
+import { it, expect, beforeEach, afterEach, vi } from "vitest";
+import handler from "../../api/company-numbers-agent-migration";
+import type { IncomingMessage, ServerResponse } from "node:http";
+let status: number; let payload: any;
+const fetchMock = vi.fn();
+const req = (extra = {}) => ({ method: "GET", url: "/api/company-numbers-agent-migration?agent_key=showmojo", headers: { authorization: "Bearer ffl_live_test" }, ...extra }) as IncomingMessage;
+const res = { writeHead: (s: number) => { status = s; }, end: (s: string) => { payload = JSON.parse(s); } } as ServerResponse;
+beforeEach(() => { status = 0; payload = null; fetchMock.mockReset(); vi.stubGlobal("fetch", fetchMock); vi.stubEnv("COMPANY_NUMBERS_MIGRATION_API_KEY_ID", "admin"); vi.stubEnv("VESTLAUNCH_BASE_URL", "https://crm.example"); vi.stubEnv("ANTHROPIC_API_KEY", "server-secret"); });
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+it("is disabled without explicit selection", async () => { vi.stubEnv("COMPANY_NUMBERS_MIGRATION_API_KEY_ID", ""); await handler(req(), res); expect(status).toBe(404); expect(fetchMock).not.toHaveBeenCalled(); });
+it("refuses mutation and unknown agents before upstream calls", async () => { await handler(req({ method: "POST" }), res); expect(status).toBe(405); await handler(req({ url: "/?agent_key=__proto__" }), res); expect(status).toBe(400); expect(fetchMock).not.toHaveBeenCalled(); });
+it("requires the selected active admin identity, not just any wildcard key", async () => { fetchMock.mockResolvedValue({ ok: true, json: async () => ({ data: { identity: { apiKeyId: "other", scopes: ["*"] } } }) }); await handler(req(), res); expect(status).toBe(403); expect(fetchMock).toHaveBeenCalledTimes(1); });
+it("does not pass through raw upstream errors", async () => { fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ data: { identity: { apiKeyId: "admin", scopes: ["*"] } } }) }).mockResolvedValueOnce({ ok: false, status: 401, text: async () => "secret" }); await handler(req(), res); expect(status).toBe(502); expect(JSON.stringify(payload)).not.toContain("secret"); });
+it("reads only the fixed agent URL and returns a fingerprint without the secret", async () => { fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ data: { identity: { apiKeyId: "admin", scopes: ["*"] } } }) }).mockResolvedValueOnce({ ok: true, json: async () => ({ id: "agent_01RKzvz2PqD2SkqpcoJL5gEg", version: 2, system: "owned cells", tools: [], mcp_servers: [], unrelated: "omitted" }) }); await handler(req(), res); expect(status).toBe(200); expect(fetchMock.mock.calls[1][0]).toBe("https://api.anthropic.com/v1/agents/agent_01RKzvz2PqD2SkqpcoJL5gEg"); expect(payload.fingerprint).toMatch(/^[0-9a-f]{64}$/); expect(payload.agent).not.toHaveProperty("unrelated"); expect(JSON.stringify(payload)).not.toContain("server-secret"); });

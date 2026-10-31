@@ -1,3 +1,4 @@
+import companyNumbersAgentMigration from "./api/company-numbers-agent-migration";
 import sheetsMcpHandler, { SHEETS_TOOL_NAMES, SHEETS_BACKEND_ROUTES } from "./api/sheets-mcp";
 /**
  * Vercel HTTP entrypoint (Node.js runtime, BYO server).
@@ -71,6 +72,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
+    if (path === "/api/company-numbers-agent-migration") {
+      await companyNumbersAgentMigration(req, res);
+      return;
+    }
     if (path === "/api/sheets-mcp") {
       await sheetsMcpHandler(req, res);
       return;
@@ -192,6 +197,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
           service: "vestlaunch-mcp",
           sheets: { tools: SHEETS_TOOL_NAMES, crm_endpoints: SHEETS_BACKEND_ROUTES },
           endpoints: [
+            "/api/company-numbers-agent-migration",
             "/api/sheets-mcp",
             "/api/mcp",
             "/api/ruckus-mcp",

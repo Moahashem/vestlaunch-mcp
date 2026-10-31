@@ -45,7 +45,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (!response.ok) return json(res, 502, { error: `Anthropic agent read failed (HTTP ${response.status})` });
     const agent = await response.json() as Record<string, unknown>;
     // Configuration fields only. Never return vaults or environment credentials.
-    return json(res, 200, { agent_key: key, fingerprint: configFingerprint(agent), agent: {
+    return json(res, 200, { agent_key: key, fingerprint: configFingerprint(agent), transport: {
+      legacy_writes_enabled: (process.env.VESTLAUNCH_ENABLE_WRITES || "").trim().toLowerCase() === "true",
+      legacy_write_allowlist: (process.env.VESTLAUNCH_WRITE_ALLOWLIST || "").trim().split(",").map(s => s.trim()).filter(Boolean),
+      direct_sheets_agents: (process.env.COMPANY_NUMBERS_DIRECT_SHEETS_AGENTS || "").split(",").map(s => s.trim()).filter(Boolean),
+    }, agent: {
       id: agent.id, name: agent.name, version: agent.version, system: agent.system,
       tools: agent.tools, mcp_servers: agent.mcp_servers, model: agent.model,
     } });

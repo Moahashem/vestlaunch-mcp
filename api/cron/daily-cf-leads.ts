@@ -1,3 +1,4 @@
+import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
 /**
  * Daily cron trigger for the FFL CF Leasing Daily Lead Counter agent (LeadSimple / Cranbrook).
  *
@@ -159,7 +160,7 @@ export default async function handler(
       method: "POST",
       headers,
       body: JSON.stringify({
-        events: [{ type: "user.message", content: [{ type: "text", text: prompt }] }],
+        events: [{ type: "user.message", content: [{ type: "text", text: `${prompt}\n\n${directSheetsAddendum("cf-leads")}` }] }],
       }),
     });
     const eventText = await eventRes.text();

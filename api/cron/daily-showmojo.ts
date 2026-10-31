@@ -1,3 +1,4 @@
+import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
 /**
  * Daily cron trigger for the FFL ShowMojo Agent (the Homes-on-market specialist).
  *
@@ -180,7 +181,7 @@ export default async function handler(
       method: "POST",
       headers,
       body: JSON.stringify({
-        events: [{ type: "user.message", content: [{ type: "text", text: prompt }] }],
+        events: [{ type: "user.message", content: [{ type: "text", text: `${prompt}\n\n${directSheetsAddendum("showmojo")}` }] }],
       }),
     });
     const eventText = await eventRes.text();

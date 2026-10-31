@@ -1,3 +1,4 @@
+import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
 /**
  * Daily cron trigger for the FFL Daily Occupancy Counter (Managed Agent #2).
  *
@@ -162,7 +163,7 @@ export default async function handler(
       method: "POST",
       headers,
       body: JSON.stringify({
-        events: [{ type: "user.message", content: [{ type: "text", text: prompt }] }],
+        events: [{ type: "user.message", content: [{ type: "text", text: `${prompt}\n\n${directSheetsAddendum("occupancy")}` }] }],
       }),
     });
     const eventText = await eventRes.text();

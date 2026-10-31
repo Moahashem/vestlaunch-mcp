@@ -1,3 +1,4 @@
+import { directSheetsAddendum, usesDirectSheets } from "../company-numbers-sheets-rollout";
 /**
  * Daily cron trigger for the FFL Sales Daily Lead Counter (Managed Agent).
  *
@@ -145,7 +146,9 @@ export default async function handler(
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
   const basePrompt = process.env.FFL_DAILY_PROMPT?.trim() || DEFAULT_PROMPT;
-  const prompt = `${basePrompt}\n\n${TAB_PLACEMENT_ADDENDUM}\n\n${CLEAR_STALE_ADDENDUM}\n\n${HOUSEKEEPING_ADDENDUM}`;
+  const prompt = usesDirectSheets("sales-lead-count")
+    ? `${basePrompt}\n\n${directSheetsAddendum("sales-lead-count")}`
+    : `${basePrompt}\n\n${TAB_PLACEMENT_ADDENDUM}\n\n${CLEAR_STALE_ADDENDUM}\n\n${HOUSEKEEPING_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

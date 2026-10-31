@@ -1,3 +1,4 @@
+import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
 /**
  * Daily cron trigger for the FFL CFA Daily Numbers agent (ResMan / Cranbrook Forest).
  *
@@ -160,7 +161,7 @@ export default async function handler(
       method: "POST",
       headers,
       body: JSON.stringify({
-        events: [{ type: "user.message", content: [{ type: "text", text: prompt }] }],
+        events: [{ type: "user.message", content: [{ type: "text", text: `${prompt}\n\n${directSheetsAddendum("cfa")}` }] }],
       }),
     });
     const eventText = await eventRes.text();

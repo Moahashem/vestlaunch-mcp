@@ -50,9 +50,9 @@ export function prepareMigration(exported) {
   if (!vest || !zapier) throw new Error('Expected toolsets missing');
   const names = [...sources[key], 'save_metric_snapshot', 'report_run_complete', 'sheets_read', 'sheets_batch_update'];
   if (key === 'sales-lead-count') names.push('sheets_create_day_tab');
-  vest.default_config = { enabled: false };
+  vest.default_config = { enabled: false, permission_policy: { type: 'always_ask' } };
   vest.configs = names.map(name => ({ name, enabled: true, permission_policy: { type: 'always_allow' } }));
-  zapier.default_config = { enabled: false };
+  zapier.default_config = { enabled: false, permission_policy: { type: 'always_ask' } };
   zapier.configs = [{ name: 'execute_zapier_read_action', enabled: true, permission_policy: { type: 'always_allow' } }];
   return { agent_key: key, agent_id: agent.id, expected_fingerprint: fingerprint, previous_version: agent.version, apply_after: key === 'showmojo' ? 'Direct Sheets access proof' : 'Two verified ShowMojo mornings', patch: { system, tools } };
 }

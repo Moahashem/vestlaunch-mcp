@@ -38,3 +38,9 @@ it("refuses rollback if someone edited the migrated agent", async () => {
   await handler(req({ rollback_version: 7, expected_fingerprint: configFingerprint(current), reviewed_patch_fingerprint: patchFingerprint({ system: before.system, tools: before.tools }) }), res);
   expect(status).toBe(409); expect(fetchMock).toHaveBeenCalledTimes(3);
 });
+
+it("makes disabled toolset defaults explicit to match Anthropic read-back", () => {
+  const mcp = proposal.patch.tools.filter((t: any) => t.type === "mcp_toolset");
+  expect(mcp).toHaveLength(2);
+  for (const t of mcp) expect(t.default_config).toEqual({ enabled: false, permission_policy: { type: "always_ask" } });
+});

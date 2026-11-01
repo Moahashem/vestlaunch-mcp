@@ -36,6 +36,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -424,18 +425,33 @@ async function dispatch(name: string, args: Record<string, unknown>): Promise<un
   }
 }
 
-function buildServer(): Server {
+const VERIFICATION_READ_TOOLS = new Set(["get_recruiting_state", "search_videoask_contacts", "get_videoask_completers"]);
+
+export function recruitingVerificationTokenOk(presented: string): boolean {
+  const expected = process.env.RECRUITING_VERIFY_TOKEN ?? "";
+  const until = Date.parse(process.env.RECRUITING_VERIFY_UNTIL ?? "");
+  if (expected.length < 32 || !Number.isFinite(until) || until <= Date.now()) return false;
+  const a = Buffer.from(presented), b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export function verificationToolAllowed(name: string): boolean {
+  return VERIFICATION_READ_TOOLS.has(name);
+}
+
+function buildServer(verificationOnly = false): Server {
   const server = new Server(
     { name: "recruiting-mcp", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: verificationOnly ? TOOLS.filter(t => verificationToolAllowed(t.name)) : TOOLS }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: rawArgs } = req.params;
     const args = (rawArgs ?? {}) as Record<string, unknown>;
     try {
+      if (verificationOnly && !verificationToolAllowed(name)) throw new Error("Verification credential permits recruiting reads only");
       const result = await dispatch(name, args);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
@@ -468,12 +484,13 @@ export default async function handler(
     .toString()
     .replace(/^Bearer\s+/i, "")
     .trim();
-  if (!incomingBearer || !recruitingMcpTokenOk(incomingBearer)) {
+  const verificationOnly = recruitingVerificationTokenOk(incomingBearer);
+  if (!incomingBearer || (!verificationOnly && !recruitingMcpTokenOk(incomingBearer))) {
     // Fails closed when RECRUITING_MCP_TOKEN is unset/short.
     sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });
     return;
   }
-  const server = buildServer();
+  const server = buildServer(verificationOnly);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

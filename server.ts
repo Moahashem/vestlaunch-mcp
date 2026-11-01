@@ -1,3 +1,4 @@
+import companyNumbersShowmojoTest from "./api/company-numbers-showmojo-test";
 import companyNumbersAgentMigration from "./api/company-numbers-agent-migration";
 import companyNumbersAgentCutover from "./api/company-numbers-agent-cutover";
 import sheetsMcpHandler, { SHEETS_TOOL_NAMES, SHEETS_BACKEND_ROUTES } from "./api/sheets-mcp";
@@ -73,6 +74,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
+    if (path === "/api/company-numbers-showmojo-test") {
+      await companyNumbersShowmojoTest(req, res);
+      return;
+    }
     if (path === "/api/company-numbers-agent-cutover") {
       await companyNumbersAgentCutover(req, res);
       return;
@@ -204,6 +209,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
           endpoints: [
             "/api/company-numbers-agent-migration",
             "/api/company-numbers-agent-cutover",
+            "/api/company-numbers-showmojo-test",
             "/api/sheets-mcp",
             "/api/mcp",
             "/api/ruckus-mcp",

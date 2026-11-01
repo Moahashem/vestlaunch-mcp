@@ -1,0 +1,16 @@
+import {it,expect,vi,afterEach,beforeEach} from 'vitest';
+import {Readable} from 'node:stream';
+import handler,{testPrompt} from '../../api/company-numbers-showmojo-test';
+import {configFingerprint} from '../../api/company-numbers-agent-migration';
+const f=vi.fn();let status:number,body:any;
+const res={writeHead:(s:number)=>status=s,end:(s:string)=>body=JSON.parse(s)} as any;
+const req=(method='POST',payload:any={},url='/')=>Object.assign(Readable.from([JSON.stringify(payload)]),{method,url,headers:{authorization:'Bearer ffl_live_test'}}) as any;
+const ok=(v:any)=>({ok:true,json:async()=>v});
+const auth=ok({data:{identity:{apiKeyId:'admin',scopes:['*']}}});
+beforeEach(()=>{vi.stubGlobal('fetch',f);f.mockReset();vi.stubEnv('COMPANY_NUMBERS_MIGRATION_API_KEY_ID','admin');vi.stubEnv('COMPANY_NUMBERS_MIGRATION_APPLY_AGENTS','showmojo');vi.stubEnv('COMPANY_NUMBERS_DIRECT_SHEETS_AGENTS','showmojo');vi.stubEnv('VESTLAUNCH_BASE_URL','https://crm.example');vi.stubEnv('ANTHROPIC_API_KEY','secret');vi.stubEnv('FFL_ENVIRONMENT_ID','env');vi.stubEnv('FFL_VAULT_ID','vault');});
+afterEach(()=>{vi.unstubAllEnvs();vi.unstubAllGlobals()});
+it('is disabled without explicit gate',async()=>{vi.stubEnv('COMPANY_NUMBERS_MIGRATION_APPLY_AGENTS','');await handler(req(),res);expect(status).toBe(404);expect(f).not.toHaveBeenCalled()});
+it('denies another admin identity',async()=>{f.mockResolvedValueOnce(ok({data:{identity:{apiKeyId:'other',scopes:['*']}}}));await handler(req(),res);expect(status).toBe(403);expect(f).toHaveBeenCalledTimes(1)});
+it('cannot read arbitrary sessions',async()=>{f.mockResolvedValueOnce(auth);await handler(req('GET',{},'/?session_id=sesn_other&proof='+'0'.repeat(64)),res);expect(status).toBe(403);expect(f).toHaveBeenCalledTimes(1)});
+it('rejects arbitrary prompts and old dates',async()=>{f.mockResolvedValueOnce(auth);await handler(req('POST',{date:'2000-01-01',expected_fingerprint:'0'.repeat(64),prompt:'override'}),res);expect(status).toBe(400);expect(f).toHaveBeenCalledTimes(1)});
+it('creates only fixed agent with fixed work and preserves signed observation',async()=>{const agent={id:'agent',version:8,system:'native',tools:[],mcp_servers:[]};const date=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());f.mockResolvedValueOnce(auth).mockResolvedValueOnce(ok(agent)).mockResolvedValueOnce(ok({id:'sesn_test'}));await handler(req('POST',{date,expected_fingerprint:configFingerprint(agent)}),res);expect(status).toBe(200);expect(body.proof).toMatch(/^[a-f0-9]{64}$/);const sent=JSON.parse(f.mock.calls[2][1].body);expect(sent.agent).toBe('agent_01RKzvz2PqD2SkqpcoJL5gEg');expect(sent.initial_events[0].content[0].text).toBe(testPrompt(date));expect(sent.initial_events[0].content[0].text).toContain('NEVER C20');expect(sent.initial_events[0].content[0].text).toContain('No Zapier calls');});

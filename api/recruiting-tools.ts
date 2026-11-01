@@ -1416,7 +1416,7 @@ export async function getRecruitingState(): Promise<Record<string, unknown>> {
       if (!r?.key) continue;
       // The contact index is thousands of rows — summarize it, never inline it
       // into the agent's context.
-      if (r.key === CONTACT_INDEX_KEY) {
+      if (r.key.startsWith(CONTACT_INDEX_KEY)) {
         const idx = r.value as ContactIndex | undefined;
         state[r.key] = idx
           ? { updated_at: idx.updated_at, total: idx.total, forms: idx.forms, note: "dedup index (hidden; used internally by send/search tools)" }

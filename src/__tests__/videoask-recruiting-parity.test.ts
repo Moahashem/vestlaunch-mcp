@@ -120,3 +120,22 @@ it("keeps paginated completion results identical through direct and Zapier trans
   expect(direct).toEqual({completers:[{name:"Fixture Candidate",email,completed_at:"2026-11-01T10:00:00Z"}],pages_fetched:2,truncated:false});
   expect(requests.slice(0,2)).toEqual(requests.slice(2));
 });
+
+
+it("summarizes all contact index versions without exposing contact rows in agent state", async () => {
+  vi.stubEnv("FFL_WORKFORCE_API_KEY", "fixture");
+  const keys = ["videoask_contact_index", "videoask_contact_index_v2", "videoask_contact_index_direct_v2"];
+  vi.stubGlobal("fetch", vi.fn(async () => json({data: [
+    ...keys.map(key => ({key, value: {updated_at: "2026-11-01", total: 7486, forms: 14, contacts: [{email}]}})),
+    {key: "testgorilla_boundary", value: "2026-11-01"},
+  ]})));
+  const {getRecruitingState} = await import("../../api/recruiting-tools.js");
+  const result = await getRecruitingState();
+  const state = result.state as Record<string, any>;
+  for (const key of keys) {
+    expect(state[key].total).toBe(7486);
+    expect(state[key].contacts).toBeUndefined();
+  }
+  expect(JSON.stringify(result)).not.toContain(email);
+  expect(state.testgorilla_boundary).toBe("2026-11-01");
+});

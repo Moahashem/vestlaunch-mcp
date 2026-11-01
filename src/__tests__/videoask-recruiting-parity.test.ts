@@ -139,3 +139,18 @@ it("summarizes all contact index versions without exposing contact rows in agent
   expect(JSON.stringify(result)).not.toContain(email);
   expect(state.testgorilla_boundary).toBe("2026-11-01");
 });
+
+
+it("limits temporary production verification to expiring read-only access", async () => {
+  const {recruitingVerificationTokenOk, verificationToolAllowed} = await import("../../api/recruiting-mcp.js");
+  const token = "a".repeat(64);
+  expect(recruitingVerificationTokenOk(token)).toBe(false);
+  vi.stubEnv("RECRUITING_VERIFY_TOKEN", token);
+  vi.stubEnv("RECRUITING_VERIFY_UNTIL", new Date(Date.now()+3600000).toISOString());
+  expect(recruitingVerificationTokenOk(token)).toBe(true);
+  expect(recruitingVerificationTokenOk("b".repeat(64))).toBe(false);
+  for (const name of ["get_recruiting_state", "search_videoask_contacts", "get_videoask_completers"]) expect(verificationToolAllowed(name)).toBe(true);
+  for (const name of ["send_recruiting_invite", "send_testgorilla_invite", "send_videoask_reminder", "send_watchdog_alert", "update_recruiting_state", "report_recruiting_run"]) expect(verificationToolAllowed(name)).toBe(false);
+  vi.stubEnv("RECRUITING_VERIFY_UNTIL", new Date(Date.now()-1).toISOString());
+  expect(recruitingVerificationTokenOk(token)).toBe(false);
+});

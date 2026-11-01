@@ -4,7 +4,7 @@
  * Output contains counts/digests only, never candidates, credentials or bodies.
  */
 import { nextVideoaskPage, videoaskPageRows, videoaskZapierReadArgs } from "../api/_videoask-pagination.js";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createVideoaskReader, videoaskReadUrl } from "../api/_videoask-direct.js";
 
@@ -13,18 +13,20 @@ async function main() {
   if (!file || ((await stat(file)).mode & 0o077)) throw new Error("Use a private mode-0600 config file");
   const config = JSON.parse(await readFile(file,"utf8"));
   if (!config.zapierUrl || new URL(config.zapierUrl).hostname !== "mcp.zapier.com") throw new Error("Expected existing Zapier MCP URL");
+  if (config.zapierTool && config.zapierTool !== "videoask_make_api_get_request") throw new Error("Only the VideoAsk GET tool is allowed");
   const direct = createVideoaskReader(() => config);
   let directCalls=0, zapierCalls=0;
   const readDirect = async (path:string) => { directCalls++; return direct(path); };
   async function legacy(path:string): Promise<Record<string,unknown>> {
     const url=videoaskReadUrl(path).href;
+    if (zapierCalls >= 85) throw new Error("Comparison task budget reached");
     zapierCalls++;
     const response=await fetch(config.zapierUrl,{
       method:"POST",redirect:"error",signal:AbortSignal.timeout(60_000),
       headers:{"content-type":"application/json",accept:"application/json, text/event-stream",
         ...(config.zapierToken ? {authorization:`Bearer ${config.zapierToken}`} : {})},
       body:JSON.stringify({jsonrpc:"2.0",id:zapierCalls,method:"tools/call",params:{
-        name:config.zapierTool || "videoask_make_api_get_request",arguments:videoaskZapierReadArgs(url)}}),
+        name:"videoask_make_api_get_request",arguments:videoaskZapierReadArgs(url)}}),
     });
     if (!response.ok) throw new Error(`Zapier HTTP ${response.status}`);
     let text=await response.text();
@@ -60,7 +62,11 @@ async function main() {
   }
   const digest=(rows:unknown[])=>createHash("sha256").update(JSON.stringify(rows.map(r=>JSON.stringify(r)).sort())).digest("hex");
   const checks:{scope:string;direct:number;legacy:number;match:boolean}[]=[];
-  function compare(scope:string,a:unknown[],b:unknown[]) { checks.push({scope,direct:a.length,legacy:b.length,match:digest(a)===digest(b)}); }
+  function compare(scope:string,a:unknown[],b:unknown[]) {
+    const check={scope,direct:a.length,legacy:b.length,match:digest(a)===digest(b)};
+    checks.push(check);
+    console.log(JSON.stringify({progress:check,directCalls,zapierCalls}));
+  }
   const formsA=await collect(readDirect,"/forms",100,100);
   const formsB=await collect(legacy,"/forms",100,100);
   const formIdentity=(r:Record<string,unknown>)=>[r.form_id ?? r.id,r.title];
@@ -84,8 +90,10 @@ async function main() {
     String(r.contact_email ?? r.email ?? "").trim().toLowerCase(),r.created_at ?? r.createdAt ?? ""];
   compare("recent-virtual-pm-completions",a.map(completion),b.map(completion));
   const passed=checks.every(c=>c.match);
-  console.log(JSON.stringify({at:new Date().toISOString(),passed,checks,directCalls,zapierCalls,
-    candidateWrites:0,emailSends:0,productionSwitch:false},null,2));
+  const receipt={at:new Date().toISOString(),passed,checks,directCalls,zapierCalls,
+    candidateWrites:0,emailSends:0,productionSwitch:false};
+  if(process.env.VIDEOASK_PARITY_RECEIPT) await writeFile(process.env.VIDEOASK_PARITY_RECEIPT,JSON.stringify(receipt,null,2)+"\n");
+  console.log(JSON.stringify(receipt,null,2));
   if(!passed) process.exitCode=1;
 }
 main().catch(()=>{console.error("Read-only comparison failed or incomplete. No recruiting switch. Upstream bodies suppressed.");process.exitCode=1;});

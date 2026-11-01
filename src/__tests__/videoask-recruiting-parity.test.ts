@@ -3,6 +3,30 @@ afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.resetModules(); 
 const json = (v: unknown) => new Response(JSON.stringify(v));
 const email = "fixture@example.test";
 
+it("builds a separate complete direct contact index without reusing or overwriting the legacy cache", async () => {
+  for(const key of ["FFL_WORKFORCE_API_KEY","VIDEOASK_CLIENT_ID","VIDEOASK_CLIENT_SECRET","VIDEOASK_REFRESH_TOKEN"]) vi.stubEnv(key,"fixture");
+  vi.stubEnv("RECRUITING_VIDEOASK_TRANSPORT","direct");
+  const rows=Array.from({length:205},(_,i)=>({name:`Fixture Candidate${i}`,email:`fixture${i}@example.test`,created_at:"2026-10-01T00:00:00Z"}));
+  const offsets:number[]=[];let saved:any;
+  vi.stubGlobal("fetch",vi.fn(async (input,options) => {
+    const url=new URL(String(input));
+    if(url.pathname === "/api/v1/agent/state") {
+      if(options.method === "GET") {expect(url.searchParams.get("key")).toBe("videoask_contact_index_direct_v1");return json({data:null});}
+      saved=JSON.parse(options.body);expect(saved.key).toBe("videoask_contact_index_direct_v1");return json({data:{}});
+    }
+    if(url.hostname === "auth.videoask.com") return json({access_token:"fixture",expires_in:86400});
+    expect(options.method).toBe("GET");
+    if(url.pathname === "/forms") return json({results:[{form_id:"88fae5e3-2780-4dc9-a167-2a8f9b2bad64",title:"Fixture form"}],next:null});
+    if(url.pathname.endsWith("/contacts")) {const offset=Number(url.searchParams.get("offset"));offsets.push(offset);return json({results:rows.slice(offset,offset+100),next:offset+100<rows.length?"next":null});}
+    throw new Error("Unexpected route");
+  }));
+  const {searchVideoaskContacts}=await import("../../api/recruiting-tools.js");
+  const result=await searchVideoaskContacts("Candidate204");
+  expect(result.hits).toHaveLength(1);
+  expect(offsets).toEqual([0,100,200]);
+  expect(saved.value.contacts).toHaveLength(205);
+});
+
 it("refuses an invitation when direct VideoAsk authentication fails, without sending email or writing state", async () => {
   for (const key of ["FFL_WORKFORCE_API_KEY","GMAIL_OAUTH_CLIENT_ID","GMAIL_OAUTH_CLIENT_SECRET","GMAIL_REFRESH_TOKEN",
     "VIDEOASK_CLIENT_ID","VIDEOASK_CLIENT_SECRET","VIDEOASK_REFRESH_TOKEN"]) vi.stubEnv(key,"fixture");

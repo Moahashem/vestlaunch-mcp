@@ -883,7 +883,11 @@ async function fetchFormContactsIncremental(
 }
 
 async function getContactIndex(): Promise<ContactIndex> {
-  const cached = (await readStateKey(CONTACT_INDEX_KEY)) as ContactIndex | undefined;
+  // Never inherit the legacy partial index when enabling direct reads.
+  // Keep separate caches so rollback cannot replace either transport's index.
+  const contactIndexKey = env("RECRUITING_VIDEOASK_TRANSPORT") === "direct"
+    ? `${CONTACT_INDEX_KEY}_direct_v1` : CONTACT_INDEX_KEY;
+  const cached = (await readStateKey(contactIndexKey)) as ContactIndex | undefined;
   if (
     cached &&
     Array.isArray(cached.contacts) &&
@@ -941,7 +945,7 @@ async function getContactIndex(): Promise<ContactIndex> {
         contacts,
         per_form: perForm,
       };
-      await writeStateKey(CONTACT_INDEX_KEY, index);
+      await writeStateKey(contactIndexKey, index);
       return index;
     } catch (err) {
       console.error(
@@ -975,7 +979,7 @@ async function getContactIndex(): Promise<ContactIndex> {
     contacts,
     per_form,
   };
-  await writeStateKey(CONTACT_INDEX_KEY, index);
+  await writeStateKey(contactIndexKey, index);
   return index;
 }
 

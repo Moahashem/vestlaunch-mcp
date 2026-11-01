@@ -74,7 +74,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
-    if (path === "/api/company-numbers-showmojo-test") {
+    if (path === "/api/company-numbers-showmojo-test" || path === "/api/company-numbers-supervised-test") {
       await companyNumbersShowmojoTest(req, res);
       return;
     }
@@ -210,6 +210,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/company-numbers-agent-migration",
             "/api/company-numbers-agent-cutover",
             "/api/company-numbers-showmojo-test",
+            "/api/company-numbers-supervised-test",
             "/api/sheets-mcp",
             "/api/mcp",
             "/api/ruckus-mcp",

@@ -50,6 +50,7 @@
  */
 
 import { createSign, createHash } from "node:crypto";
+import { directVideoaskGet } from "./_videoask-direct.js";
 
 // ───────────────────────── config ─────────────────────────
 
@@ -591,6 +592,10 @@ function unpeelZapierJson(text: string): unknown {
 }
 
 async function videoaskGet(pathAndQuery: string): Promise<Record<string, unknown>> {
+  // Default remains Zapier until read-only parity and OAuth verification pass.
+  const transport = env("RECRUITING_VIDEOASK_TRANSPORT") || "zapier";
+  if (transport === "direct") return directVideoaskGet(pathAndQuery);
+  if (transport !== "zapier") throw new Error("Unknown recruiting VideoAsk transport");
   const toolName = env("ZAPIER_VIDEOASK_GET_TOOL") || "videoask_make_api_get_request";
   const url = pathAndQuery.startsWith("http") ? pathAndQuery : `${VIDEOASK_API_BASE}${pathAndQuery}`;
   const out = await zapierToolCall(toolName, { url });

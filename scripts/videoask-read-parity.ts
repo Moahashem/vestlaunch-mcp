@@ -3,6 +3,7 @@
  * invocation, email API, CRM state access, or live cache mutation is possible.
  * Output contains counts/digests only, never candidates, credentials or bodies.
  */
+import { nextVideoaskPage, videoaskPageRows, videoaskZapierReadArgs } from "../api/_videoask-pagination.js";
 import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createVideoaskReader, videoaskReadUrl } from "../api/_videoask-direct.js";
@@ -23,7 +24,7 @@ async function main() {
       headers:{"content-type":"application/json",accept:"application/json, text/event-stream",
         ...(config.zapierToken ? {authorization:`Bearer ${config.zapierToken}`} : {})},
       body:JSON.stringify({jsonrpc:"2.0",id:zapierCalls,method:"tools/call",params:{
-        name:config.zapierTool || "videoask_make_api_get_request",arguments:{url}}}),
+        name:config.zapierTool || "videoask_make_api_get_request",arguments:videoaskZapierReadArgs(url)}}),
     });
     if (!response.ok) throw new Error(`Zapier HTTP ${response.status}`);
     let text=await response.text();
@@ -42,31 +43,33 @@ async function main() {
   type Reader=(path:string)=>Promise<Record<string,unknown>>;
   async function collect(read:Reader,path:string,limit:number,cap:number,cutoff?:number) {
     const rows:Record<string,unknown>[]=[];
+    let current=`${path}?limit=${limit}&offset=0`;
     for(let page=0;page<cap;page++) {
-      const data=await read(`${path}?limit=${limit}&offset=${page*limit}`);
-      const items=(data.results ?? data.contents) as Record<string,unknown>[];
+      const data=await read(current);
+      const items=videoaskPageRows(data);
       if (!Array.isArray(items)) throw new Error("Missing collection");
       for (const item of items) {
         if (cutoff && Date.parse(String(item.created_at)) < cutoff) return rows;
         rows.push(item);
       }
-      if (!data.next) return rows;
-      if (!items.length) throw new Error("Empty page with continuation");
+      const next=nextVideoaskPage(current,data.next);
+      if (!next) return rows;
+      current=next;
     }
     throw new Error("Pagination cap reached; comparison incomplete (do not switch)");
   }
   const digest=(rows:unknown[])=>createHash("sha256").update(JSON.stringify(rows.map(r=>JSON.stringify(r)).sort())).digest("hex");
   const checks:{scope:string;direct:number;legacy:number;match:boolean}[]=[];
   function compare(scope:string,a:unknown[],b:unknown[]) { checks.push({scope,direct:a.length,legacy:b.length,match:digest(a)===digest(b)}); }
-  const formsA=await collect(readDirect,"/forms",100,1);
-  const formsB=await collect(legacy,"/forms",100,1);
+  const formsA=await collect(readDirect,"/forms",100,100);
+  const formsB=await collect(legacy,"/forms",100,100);
   const formIdentity=(r:Record<string,unknown>)=>[r.form_id ?? r.id,r.title];
   compare("forms",formsA.map(formIdentity),formsB.map(formIdentity));
   if (!checks[0]!.match) throw new Error("Form inventory differs; stop before contact comparison");
   for (const form of formsA) {
     const path=`/forms/${form.form_id ?? form.id}/contacts`;
-    const a=await collect(readDirect,path,100,40);
-    const b=await collect(legacy,path,100,40);
+    const a=await collect(readDirect,path,100,250);
+    const b=await collect(legacy,path,100,250);
     const identity=(r:Record<string,unknown>)=>[String(r.name ?? r.contact_name ?? "").trim().toLowerCase(),
       String(r.email ?? r.contact_email ?? "").trim().toLowerCase(),r.created_at ?? ""];
     compare(`contacts:${checks.length}`,a.map(identity),b.map(identity));

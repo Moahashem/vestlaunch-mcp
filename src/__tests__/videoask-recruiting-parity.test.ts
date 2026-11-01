@@ -3,27 +3,55 @@ afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.resetModules(); 
 const json = (v: unknown) => new Response(JSON.stringify(v));
 const email = "fixture@example.test";
 
-it("builds a separate complete direct contact index without reusing or overwriting the legacy cache", async () => {
+it("does not persist a partial index when the pagination cap is reached", async () => {
   for(const key of ["FFL_WORKFORCE_API_KEY","VIDEOASK_CLIENT_ID","VIDEOASK_CLIENT_SECRET","VIDEOASK_REFRESH_TOKEN"]) vi.stubEnv(key,"fixture");
   vi.stubEnv("RECRUITING_VIDEOASK_TRANSPORT","direct");
+  let writes=0;
+  vi.stubGlobal("fetch",vi.fn(async (input,options)=>{
+    const url=new URL(String(input));
+    if(url.pathname==="/api/v1/agent/state") {
+      if(options.method!=="GET") writes++;
+      return json({data:null});
+    }
+    if(url.hostname==="auth.videoask.com") return json({access_token:"fixture",expires_in:86400});
+    if(url.pathname==="/forms") return json({results:[{form_id:"88fae5e3-2780-4dc9-a167-2a8f9b2bad64",title:"Fixture"}],next:null});
+    const offset=Number(url.searchParams.get("offset"));
+    return json({results:[{name:`Candidate${offset}`,email:`fixture${offset}@example.test`,created_at:"2026-10-01"}],
+      next:`https://api.videoask.com${url.pathname}?limit=1&offset=${offset+1}`});
+  }));
+  const {searchVideoaskContacts}=await import("../../api/recruiting-tools.js");
+  await expect(searchVideoaskContacts("Candidate")).rejects.toThrow("refusing partial index");
+  expect(writes).toBe(0);
+});
+
+it.each([["direct",20],["direct",100],["zapier",20],["zapier",100]] as const)("builds a complete %s index with %i-row pages", async (transport,pageSize) => {
+  for(const key of ["FFL_WORKFORCE_API_KEY","VIDEOASK_CLIENT_ID","VIDEOASK_CLIENT_SECRET","VIDEOASK_REFRESH_TOKEN"]) vi.stubEnv(key,"fixture");
+  vi.stubEnv("RECRUITING_VIDEOASK_TRANSPORT",transport);
+  vi.stubEnv("ZAPIER_RECRUITING_MCP_URL","https://fixture.test/mcp");
+  const cacheKey=transport === "direct" ? "videoask_contact_index_direct_v2" : "videoask_contact_index_v2";
   const rows=Array.from({length:205},(_,i)=>({name:`Fixture Candidate${i}`,email:`fixture${i}@example.test`,created_at:"2026-10-01T00:00:00Z"}));
   const offsets:number[]=[];let saved:any;
   vi.stubGlobal("fetch",vi.fn(async (input,options) => {
-    const url=new URL(String(input));
+    const zapier=String(input)==="https://fixture.test/mcp";
+    const args=zapier ? JSON.parse(options.body).params.arguments : null;
+    // Emulate Zapier: only explicit querystring fields reach the API.
+    if(zapier) {expect(args.url).not.toContain("?");expect(args.fail_on_errors).toBe(true);}
+    const url=new URL(zapier ? `${args.url}?${new URLSearchParams(args.querystring)}` : String(input));
+    const respond=(body:unknown)=>json(zapier?{result:{content:[{type:"text",text:JSON.stringify({results:[{status:200,body}]})}]}}:body);
     if(url.pathname === "/api/v1/agent/state") {
-      if(options.method === "GET") {expect(url.searchParams.get("key")).toBe("videoask_contact_index_direct_v1");return json({data:null});}
-      saved=JSON.parse(options.body);expect(saved.key).toBe("videoask_contact_index_direct_v1");return json({data:{}});
+      if(options.method === "GET") {expect(url.searchParams.get("key")).toBe(cacheKey);return json({data:null});}
+      saved=JSON.parse(options.body);expect(saved.key).toBe(cacheKey);return json({data:{}});
     }
     if(url.hostname === "auth.videoask.com") return json({access_token:"fixture",expires_in:86400});
-    expect(options.method).toBe("GET");
-    if(url.pathname === "/forms") return json({results:[{form_id:"88fae5e3-2780-4dc9-a167-2a8f9b2bad64",title:"Fixture form"}],next:null});
-    if(url.pathname.endsWith("/contacts")) {const offset=Number(url.searchParams.get("offset"));offsets.push(offset);return json({results:rows.slice(offset,offset+100),next:offset+100<rows.length?"next":null});}
+    expect(options.method).toBe(zapier?"POST":"GET");
+    if(url.pathname === "/forms") return respond({results:[{form_id:"88fae5e3-2780-4dc9-a167-2a8f9b2bad64",title:"Fixture form"}],next:null});
+    if(url.pathname.endsWith("/contacts")) {const offset=Number(url.searchParams.get("offset"));offsets.push(offset);return respond({results:rows.slice(offset,offset+pageSize),next:offset+pageSize<rows.length?`https://api.videoask.com${url.pathname}?limit=${pageSize}&offset=${offset+pageSize}`:null});}
     throw new Error("Unexpected route");
   }));
   const {searchVideoaskContacts}=await import("../../api/recruiting-tools.js");
   const result=await searchVideoaskContacts("Candidate204");
   expect(result.hits).toHaveLength(1);
-  expect(offsets).toEqual([0,100,200]);
+  expect(offsets).toEqual(Array.from({length:Math.ceil(205/pageSize)},(_,i)=>i*pageSize));
   expect(saved.value.contacts).toHaveLength(205);
 });
 
@@ -67,7 +95,7 @@ it.each(["invite", "assessment", "reminder"])("retains same-day duplicate refusa
 
 it("keeps paginated completion results identical through direct and Zapier transports, stripping transcripts", async () => {
   const pages = [
-    {results:[{contact_name:"Fixture Candidate",contact_email:"FIXTURE@example.test",created_at:"2026-11-01T10:00:00Z",transcript:"must not reach agent"}],next:"next"},
+    {results:[{contact_name:"Fixture Candidate",contact_email:"FIXTURE@example.test",created_at:"2026-11-01T10:00:00Z",transcript:"must not reach agent"}],next:"https://api.videoask.com/questions/0d0ab5f1-fa6c-46af-849f-2081f65d9af3/answers?limit=20&offset=20"},
     {results:[{contact_name:"Older Candidate",contact_email:"old@example.test",created_at:"2026-10-01T10:00:00Z"}],next:null},
   ];
   vi.stubEnv("ZAPIER_RECRUITING_MCP_URL","https://fixture.test/mcp");
@@ -76,9 +104,10 @@ it("keeps paginated completion results identical through direct and Zapier trans
   vi.stubGlobal("fetch",vi.fn(async (url, options) => {
     if (String(url) === "https://auth.videoask.com/oauth/token") return json({access_token:"fixture",expires_in:86400});
     const zapier = String(url) === "https://fixture.test/mcp";
-    const target = zapier ? JSON.parse(options.body).params.arguments.url : String(url);
+    const args = zapier ? JSON.parse(options.body).params.arguments : null;
+    const target = zapier ? `${args.url}?${new URLSearchParams(args.querystring)}` : String(url);
     requests.push(target);
-    const page = pages[new URL(target).searchParams.get("offset") === "25" ? 1 : 0];
+    const page = pages[new URL(target).searchParams.get("offset") === "20" ? 1 : 0];
     if (!zapier) { expect(options.method).toBe("GET"); return json(page); }
     return json({result:{content:[{type:"text",text:JSON.stringify({results:[{status:200,body:page}]})}]}});
   }));

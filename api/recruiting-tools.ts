@@ -51,11 +51,11 @@
 
 import { createSign, createHash } from "node:crypto";
 import { directVideoaskGet } from "./_videoask-direct.js";
+import { nextVideoaskPage, videoaskPageRows, videoaskZapierReadArgs } from "./_videoask-pagination.js";
 
 // ───────────────────────── config ─────────────────────────
 
 const GMAIL_DEFAULT_IMPERSONATE = "mo@flatfeelandlord.com";
-const VIDEOASK_API_BASE = "https://api.videoask.com";
 const VIDEOASK_ORG_ID_DEFAULT = "94dc21de-9c4d-4abc-a933-d8324bd853e3";
 /** "Virtual PM Flat Fee Landlord" form, Screening question 2 (verified 2026-08-17). */
 const VIDEOASK_DEFAULT_QUESTION_ID = "0d0ab5f1-fa6c-46af-849f-2081f65d9af3";
@@ -597,8 +597,7 @@ async function videoaskGet(pathAndQuery: string): Promise<Record<string, unknown
   if (transport === "direct") return directVideoaskGet(pathAndQuery);
   if (transport !== "zapier") throw new Error("Unknown recruiting VideoAsk transport");
   const toolName = env("ZAPIER_VIDEOASK_GET_TOOL") || "videoask_make_api_get_request";
-  const url = pathAndQuery.startsWith("http") ? pathAndQuery : `${VIDEOASK_API_BASE}${pathAndQuery}`;
-  const out = await zapierToolCall(toolName, { url });
+  const out = await zapierToolCall(toolName, videoaskZapierReadArgs(pathAndQuery));
   const parsed = unpeelZapierJson(out);
   if (!parsed || typeof parsed !== "object") {
     throw new Error(`VideoAsk GET ${pathAndQuery} returned non-object: ${String(out).slice(0, 200)}`);
@@ -667,17 +666,15 @@ export async function getVideoaskCompleters(
   if (Number.isNaN(since)) throw new Error(`since_iso is not a valid date: ${sinceIso}`);
 
   const completers: Completer[] = [];
-  let offset = 0;
+  let path = `/questions/${qid}/answers?limit=25&offset=0`;
   let pages = 0;
   let truncated = false;
 
   while (pages < MAX_VIDEOASK_PAGES) {
-    const page = await videoaskGet(`/questions/${qid}/answers?limit=25&offset=${offset}`);
+    const page = await videoaskGet(path);
     pages += 1;
-    const contents = (page.results ?? page.contents ?? page.answers ?? []) as Array<
-      Record<string, unknown>
-    >;
-    if (!Array.isArray(contents) || contents.length === 0) break;
+    const contents = videoaskPageRows(page);
+    if (contents.length === 0) break;
 
     let reachedOlder = false;
     for (const rec of contents) {
@@ -695,11 +692,11 @@ export async function getVideoaskCompleters(
     }
     if (reachedOlder) break;
 
-    const next = page.next;
+    const next = nextVideoaskPage(path, page.next);
     if (!next) break;
-    offset += 25;
+    path = next;
+    if (pages >= MAX_VIDEOASK_PAGES) truncated = true;
   }
-  if (pages >= MAX_VIDEOASK_PAGES) truncated = true;
   return { completers, pages_fetched: pages, truncated };
 }
 
@@ -737,7 +734,7 @@ const CONTACT_INDEX_MAX_AGE_MS = 12 * 3600 * 1000;
  *  single biggest consumer of the Zapier task budget. */
 const CONTACT_INDEX_FULL_REBUILD_MS = 7 * 24 * 3600 * 1000;
 const CONTACT_PAGE_LIMIT = 100;
-const MAX_CONTACT_PAGES_PER_FORM = 40;
+const MAX_CONTACT_PAGES_PER_FORM = 250;
 
 interface ContactRow {
   n: string;
@@ -778,11 +775,17 @@ export function detectPageOrder(rows: ContactRow[]): "newest_first" | "oldest_fi
 }
 
 async function listVideoaskForms(): Promise<Array<{ form_id: string; title: string }>> {
-  const page = await videoaskGet(`/forms?limit=100`);
-  const forms = (page.results ?? page.contents ?? []) as Array<Record<string, unknown>>;
-  if (!Array.isArray(forms) || forms.length === 0) {
-    throw new Error("VideoAsk /forms returned no forms — refusing to build an empty dedup index.");
+  let path = "/forms?limit=100&offset=0";
+  const forms: Record<string, unknown>[] = [];
+  for (let i = 0; ; i++) {
+    if (i >= 100) throw new Error("VideoAsk form pagination cap reached");
+    const page = await videoaskGet(path);
+    forms.push(...videoaskPageRows(page));
+    const next = nextVideoaskPage(path, page.next);
+    if (!next) break;
+    path = next;
   }
+  if (!forms.length) throw new Error("VideoAsk /forms returned no forms — refusing an empty dedup index");
   return forms.map((f) => ({
     form_id: String(f.form_id ?? f.id ?? ""),
     title: String(f.title ?? "").trim(),
@@ -794,12 +797,10 @@ async function fetchFormContacts(
   startPage = 0,
 ): Promise<ContactIndex["contacts"]> {
   const out: ContactIndex["contacts"] = [];
-  for (let pageNo = startPage; pageNo < startPage + MAX_CONTACT_PAGES_PER_FORM; pageNo++) {
-    const page = await videoaskGet(
-      `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=${pageNo * CONTACT_PAGE_LIMIT}`,
-    );
-    const recs = (page.results ?? page.contents ?? []) as Array<Record<string, unknown>>;
-    if (!Array.isArray(recs) || recs.length === 0) break;
+  let path = `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=${startPage * CONTACT_PAGE_LIMIT}`;
+  for (let pageNo = 0; pageNo < MAX_CONTACT_PAGES_PER_FORM; pageNo++) {
+    const page = await videoaskGet(path);
+    const recs = videoaskPageRows(page);
     for (const r of recs) {
       out.push({
         n: String(r.name ?? r.contact_name ?? "").trim().toLowerCase(),
@@ -808,9 +809,11 @@ async function fetchFormContacts(
         f: form.title,
       });
     }
-    if (recs.length < CONTACT_PAGE_LIMIT || !page.next) break;
+    const next = nextVideoaskPage(path, page.next);
+    if (!next) return out;
+    path = next;
   }
-  return out;
+  throw new Error("VideoAsk contact pagination cap reached; refusing partial index");
 }
 
 /**
@@ -823,10 +826,9 @@ async function fetchFormContactsIncremental(
   known: { count: number },
   existingKeys: Set<string>,
 ): Promise<ContactRow[]> {
-  const page0 = await videoaskGet(
-    `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=0`,
-  );
-  const rows0raw = (page0.results ?? page0.contents ?? []) as Array<Record<string, unknown>>;
+  let path = `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=0`;
+  const page0 = await videoaskGet(path);
+  const rows0raw = videoaskPageRows(page0);
   if (!Array.isArray(rows0raw)) throw new Error(`form ${form.form_id}: page 0 not an array`);
   const toRow = (r: Record<string, unknown>): ContactRow => ({
     n: String(r.name ?? r.contact_name ?? "").trim().toLowerCase(),
@@ -848,7 +850,7 @@ async function fetchFormContactsIncremental(
     // New rows live at the front; stop at the first page that overlaps cache.
     let pageNo = 0;
     let rows = rows0;
-    let next = page0.next;
+    let next = nextVideoaskPage(path, page0.next);
     for (;;) {
       let sawKnown = false;
       for (const r of rows) {
@@ -858,13 +860,11 @@ async function fetchFormContactsIncremental(
       if (sawKnown || !next) break;
       pageNo += 1;
       if (pageNo >= MAX_CONTACT_PAGES_PER_FORM) throw new Error(`form ${form.form_id}: incremental page cap hit`);
-      const page = await videoaskGet(
-        `/forms/${form.form_id}/contacts?limit=${CONTACT_PAGE_LIMIT}&offset=${pageNo * CONTACT_PAGE_LIMIT}`,
-      );
-      const raw = (page.results ?? page.contents ?? []) as Array<Record<string, unknown>>;
-      if (!Array.isArray(raw) || raw.length === 0) break;
+      path = next;
+      const page = await videoaskGet(path);
+      const raw = videoaskPageRows(page);
       rows = raw.map(toRow);
-      next = page.next;
+      next = nextVideoaskPage(path, page.next);
     }
   } else {
     // Oldest-first: new rows live at the tail; start where the cache ends.
@@ -886,7 +886,7 @@ async function getContactIndex(): Promise<ContactIndex> {
   // Never inherit the legacy partial index when enabling direct reads.
   // Keep separate caches so rollback cannot replace either transport's index.
   const contactIndexKey = env("RECRUITING_VIDEOASK_TRANSPORT") === "direct"
-    ? `${CONTACT_INDEX_KEY}_direct_v1` : CONTACT_INDEX_KEY;
+    ? `${CONTACT_INDEX_KEY}_direct_v2` : `${CONTACT_INDEX_KEY}_v2`;
   const cached = (await readStateKey(contactIndexKey)) as ContactIndex | undefined;
   if (
     cached &&

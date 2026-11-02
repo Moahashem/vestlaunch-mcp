@@ -46,9 +46,11 @@ describe("ruckus tools v2 (10/13 build it all)", () => {
 
 
 describe("approved actions + ResMan reads (Mo 2026-10-14)", () => {
-  it("ruckus_action says it runs only after approval", () => {
+  it("ruckus_action works off words, not cards (Mo 2026-11-02)", () => {
     const t = ORDER_TOOLS.find((x) => x.name === "ruckus_action")!;
-    expect(t.description).toMatch(/approve A12/);
+    expect(t.description).toMatch(/RUNS IT AT ONCE for every system/);
+    expect(t.description).toMatch(/Never mention request codes/);
+    expect(t.description).not.toMatch(/approval card/);
     expect(t.description).toMatch(/never say it's done before the result posts/);
   });
   it("ruckus_resman is read only", () => {

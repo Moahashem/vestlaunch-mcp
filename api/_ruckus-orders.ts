@@ -116,7 +116,7 @@ ORDER_TOOLS.push(
       "Never mention request codes (A12) in chat; never say it's done before the result posts. " +
       "paige = tell Paige (the AP invoice agent) something and start her run now: instruction = exactly what she should do, naming the vendor and every invoice number/amount/GL it releases (empty = just an extra run under her normal rules). " +
       "list → recent requests and results. " +
-      "preapprove {system: vestlaunch|paige, tool, business?, requestedBy} → asks Mo/Yuliana in plain words for a STANDING OK so matching proposals run without asking each time; only routine record-keeping qualifies " +
+      "preapprove {system: vestlaunch|paige, tool, business?, requestedBy, chatId, quote: their message copied exactly} → a STANDING OK so matching proposals run without asking each time: Mo's or Yuliana's own words turn it on at once; from anyone else it's put to them in plain words. Only routine record-keeping qualifies " +
       "(add_feature_request_note, create_task, update_task, add_note, an extra Paige run) — never ticket status/wording, tags, ResMan/AppFolio changes, money, owner records, messages or deletes. " +
       "unpreapprove {tool} ends one. standing → the ones that are on.",
     inputSchema: {
@@ -132,7 +132,7 @@ ORDER_TOOLS.push(
         business: { type: "string", enum: ["ffl", "cranbrook"] },
         requestedBy: { type: "string" },
         chatId: { type: "string" },
-        quote: { type: "string", description: "propose: the asker's message copied exactly, so code can verify a direct ask from Mo or Yuliana and run it at once. Always pass it." },
+        quote: { type: "string", description: "propose / preapprove: the asker's message copied exactly, so code can verify a direct ask from Mo or Yuliana and run it at once. Always pass it." },
       },
       required: ["action"],
       additionalProperties: false,

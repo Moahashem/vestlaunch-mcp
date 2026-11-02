@@ -1,7 +1,7 @@
 import { it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import handler, { patchFingerprint } from "../../api/company-numbers-agent-cutover";
+import handler, { patchFingerprint, repairCfaCountGate, CFA_OLD_COUNT_GATE, CFA_COUNT_GATE } from "../../api/company-numbers-agent-cutover";
 import { configFingerprint } from "../../api/company-numbers-agent-migration";
 import { prepareMigration } from "../../scripts/prepare-company-numbers-migration.mjs";
 const before = { id: "agent_01RKzvz2PqD2SkqpcoJL5gEg", version: 7, model: "unchanged", system: "- HOW TO WRITE\n_zap_raw_request\n- Homes header\nowned A104 A105 A106", tools: [{ type: "agent_toolset_20260401" }, { type: "mcp_toolset", mcp_server_name: "vestlaunch" }, { type: "mcp_toolset", mcp_server_name: "zapier" }], mcp_servers: [{ name: "vestlaunch", url: "https://existing.example/mcp" }] };
@@ -43,4 +43,23 @@ it("makes disabled toolset defaults explicit to match Anthropic read-back", () =
   const mcp = proposal.patch.tools.filter((t: any) => t.type === "mcp_toolset");
   expect(mcp).toHaveLength(2);
   for (const t of mcp) expect(t.default_config).toEqual({ enabled: false, permission_policy: { type: "always_ask" } });
+});
+
+
+it("repairs only the CFA account-count gate and preserves all tools and unrelated instructions", async () => {
+  vi.stubEnv("COMPANY_NUMBERS_MIGRATION_APPLY_AGENTS", "cfa");
+  const cfa = {...before, id:"agent_019VLn9nhFmWrDNsasKfChMq", version:12, system:`before ${CFA_OLD_COUNT_GATE} after`};
+  const patch = repairCfaCountGate(cfa);
+  expect(patch.system).toBe(`before ${CFA_COUNT_GATE} after`);
+  expect(patch.tools).toEqual(cfa.tools);
+  fetchMock.mockResolvedValueOnce(auth).mockResolvedValueOnce(ok(cfa)).mockResolvedValueOnce(ok({})).mockResolvedValueOnce(ok({...cfa,...patch,version:13}));
+  await handler(req({repair:"cfa-count-gate",expected_fingerprint:configFingerprint(cfa),reviewed_patch_fingerprint:patchFingerprint(patch)},"cfa"),res);
+  expect(status).toBe(200);expect(payload.version).toBe(13);
+  expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual(patch);
+});
+it("refuses replay or unknown CFA gate text rather than replacing other instructions", () => {
+  const cfa={id:"agent_019VLn9nhFmWrDNsasKfChMq",version:12,system:CFA_OLD_COUNT_GATE,tools:[]};
+  expect(()=>repairCfaCountGate({...cfa,version:13})).toThrow();
+  expect(()=>repairCfaCountGate({...cfa,system:"changed"})).toThrow();
+  expect(()=>repairCfaCountGate({...cfa,id:before.id})).toThrow();
 });

@@ -8,6 +8,12 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { COMPANY_NUMBER_AGENTS, configFingerprint } from "./company-numbers-agent-migration";
 import { prepareMigration } from "../scripts/prepare-company-numbers-migration.mjs";
+export const CFA_OLD_COUNT_GATE = "D15_balances_over_500 between 0 and 100.";
+export const CFA_COUNT_GATE = "D15_balances_over_500 is an ACCOUNT COUNT, not a percentage: require a non-negative safe integer no greater than delinquency.components.aging_accounts, which must also be a non-negative safe integer. Preserve the tool's existing account scope (including former residents/HAP); do not cap this count at 100 or at total doors. Null remains unavailable and must be skipped; missing/invalid aging_accounts fails the D15 gate and alerts.";
+export function repairCfaCountGate(agent: Record<string, unknown>) {
+  if (agent.id !== COMPANY_NUMBER_AGENTS.cfa || agent.version !== 12 || typeof agent.system !== "string" || agent.system.split(CFA_OLD_COUNT_GATE).length !== 2) throw new Error("CFA count-gate baseline changed");
+  return {system: agent.system.replace(CFA_OLD_COUNT_GATE, CFA_COUNT_GATE), tools: agent.tools};
+}
 const BASELINE_VERSIONS: Record<string, number> = { showmojo: 7, "sales-lead-count": 15, occupancy: 19, cfa: 11, "cf-leads": 5 };
 
 function json(res: ServerResponse, status: number, value: unknown) {
@@ -37,8 +43,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     }
     let input: Record<string, unknown>;
     try { input = JSON.parse(body); } catch { return json(res, 400, { error: "Invalid JSON" }); }
+    const repair = input?.repair === "cfa-count-gate";
     const rollback = input && Object.hasOwn(input, "rollback_version");
-    const keys = rollback ? "expected_fingerprint,reviewed_patch_fingerprint,rollback_version" : "expected_fingerprint,reviewed_patch_fingerprint";
+    const keys = repair ? "expected_fingerprint,repair,reviewed_patch_fingerprint" : rollback ? "expected_fingerprint,reviewed_patch_fingerprint,rollback_version" : "expected_fingerprint,reviewed_patch_fingerprint";
     if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== keys || (rollback && input.rollback_version !== BASELINE_VERSIONS[key]) ||
       !/^[a-f0-9]{64}$/.test(String(input.expected_fingerprint)) || !/^[a-f0-9]{64}$/.test(String(input.reviewed_patch_fingerprint))) return json(res, 400, { error: "Two review fingerprints required" });
     const auth = await fetch(`${base}/api/v1/me`, { headers: { Authorization: token }, signal: AbortSignal.timeout(15000), cache: "no-store" });
@@ -56,7 +63,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const fingerprint = configFingerprint(before);
     if (fingerprint !== input.expected_fingerprint) return json(res, 409, { error: "Live agent changed; export and review again" });
     let patch: { system: unknown; tools: unknown };
-    if (rollback) {
+    if (repair) {
+      if (key !== "cfa" || before.version !== 12) return json(res, 409, {error: "CFA v12 required for count-gate repair"});
+      patch = repairCfaCountGate(before);
+    } else if (rollback) {
       const original = await read(BASELINE_VERSIONS[key]);
       const migrated = prepareMigration({ agent_key: key, fingerprint: configFingerprint(original), agent: original }).patch;
       if (original.version !== BASELINE_VERSIONS[key] || before.system !== migrated.system || !isDeepStrictEqual(before.tools, migrated.tools) ||

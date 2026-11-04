@@ -635,8 +635,11 @@ const ENGINEER_TOOL_DESC =
   "schedule your own check (ruckus_schedule once, ~35 minutes out) that posts the outcome either " +
   "way: the channel gets a '🔧 [Engineer] started' note and a '✅ finished' / '❌ FAILED' note from " +
   "the run itself; if neither arrived by your check, the dispatch died — say so, do not say the " +
-  "engineer is still on it. The engineer only sees the vestlaunch-mcp code; a bug that lives in " +
-  "ffl-crm or on the VPS comes back as an issue naming it, which a person then owns.";
+  "engineer is still on it. The engineer works across vestlaunch-mcp (the workers), ffl-crm (the " +
+  "CRM API the workers call, where most real bugs live) and flatfeelandlord-com, and opens the PR " +
+  "as the bot lando-commits in whichever repo owns the bug; only a VPS-side cause comes back as an " +
+  "issue. Pass repo_hint when the error text names the home (an ffl-crm endpoint path or PR → " +
+  "'ffl-crm'); otherwise leave it 'auto'.";
 
 const ENGINEER_TOOL_SCHEMA = {
   type: "object" as const,
@@ -661,6 +664,11 @@ const ENGINEER_TOOL_SCHEMA = {
     error_text: {
       type: "string",
       description: "The recorded error message(s) from ruckus_diagnose_worker.",
+    },
+    repo_hint: {
+      type: "string",
+      enum: ["auto", "vestlaunch-mcp", "ffl-crm", "flatfeelandlord-com"],
+      description: "Where the bug probably lives, when the error text makes it obvious; default auto.",
     },
   },
   required: ["worker", "requested_by", "request_quote"],
@@ -713,6 +721,10 @@ async function ruckusCallEngineer(
     typeof args.error_text === "string" && args.error_text.trim()
       ? args.error_text.trim().slice(0, 1500)
       : "(none provided)";
+  const repoHint =
+    typeof args.repo_hint === "string" && ["vestlaunch-mcp", "ffl-crm", "flatfeelandlord-com"].includes(args.repo_hint)
+      ? args.repo_hint
+      : "auto";
 
   const dispatch = await githubApi(
     ghToken,
@@ -725,6 +737,7 @@ async function ruckusCallEngineer(
         diagnosis,
         error_text: errorText,
         requested_by: `${requestedBy} — "${requestQuote.slice(0, 300)}"`,
+        repo_hint: repoHint,
       },
     },
   );
@@ -744,7 +757,8 @@ async function ruckusCallEngineer(
     label: DIAGNOSE_WORKERS[worker].label,
     runsUrl: `https://github.com/${ENGINEER_REPO}/actions/workflows/${ENGINEER_WORKFLOW_FILE}`,
     note:
-      "Engineer dispatched. Expect a fix PR or a needs-human issue in roughly 15-30 minutes. The run " +
+      "Engineer dispatched (it checks vestlaunch-mcp, ffl-crm and the website; the PR comes from " +
+      "the bot lando-commits in the repo that owns the bug). Expect a fix PR or a needs-human issue in roughly 15-40 minutes. The run " +
       "posts '🔧 started' now and '✅ finished' or '❌ FAILED' to this channel when it ends. Schedule " +
       "a once check ~35 minutes out that reports either way; if no '✅'/'❌' note arrived by then, " +
       "the dispatch died: say so. Do not re-dispatch for this same incident while a run is open.",

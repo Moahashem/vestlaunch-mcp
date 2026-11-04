@@ -1663,9 +1663,11 @@ const FFL_HUDAF_TOOL_NAME = "get_ffl_huddle_appfolio";
 const FFL_HUDAF_TOOL_DESC =
   "Morning-huddle AppFolio brief for Company Numbers H40/H41: returns { h40_header, " +
   "h41_notes_block (write VERBATIM into H41), move_ins_this_week, move_ins_next_week, " +
-  "receipts_available }. Contents: scheduled move-ins this week and next week (Sun-Sat CT) " +
-  "with whether the tenant has paid the security deposit and first month's rent " +
-  "(deposit_register receipts vs amounts due). Source = /api/v1/analytics/ffl-huddle-appfolio. " +
+  "charges_available, roster_coverage_complete, roster_review_items }. Contents: scheduled " +
+  "move-ins this week and next week (Sun-Sat CT) with whether the household's billed move-in " +
+  "charges are paid (AppFolio charge_detail matched by occupancy/property/unit), lease " +
+  "countersignature, and AppFolio records needing review. 'payments UNKNOWN' means the charge " +
+  "evidence could not be verified, not that the tenant did not pay. Source = /api/v1/analytics/ffl-huddle-appfolio. " +
   "No arguments. Read-only.";
 const FFL_HUDAF_TOOL_SCHEMA = {
   type: "object" as const,
@@ -1678,7 +1680,8 @@ async function getFflHuddleAppfolio(cfg: Cfg): Promise<unknown> {
   if (!resp.success) {
     throw new Error(
       `ffl-huddle-appfolio endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
-        "Requires GET /api/v1/analytics/ffl-huddle-appfolio (ffl-crm PR #589) deployed and scope properties:read.",
+        "The endpoint is deployed (ffl-crm src/app/api/v1/analytics/ffl-huddle-appfolio/route.ts); a 401/403 is the " +
+        "API key or its properties:read scope, a 502 is the route refusing or AppFolio failing — read the error above.",
     );
   }
   const d = resp.data;

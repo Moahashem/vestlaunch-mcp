@@ -43,6 +43,10 @@ jobs:
   repair:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Job-level so the notify steps can test it in `if:` (a step `if:` may not
+    # read the secrets context directly).
+    env:
+      CRON_SECRET: ${{ secrets.VESTLAUNCH_CRON_SECRET }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -69,9 +73,7 @@ jobs:
       # real dispatch died in 184 ms before its first model call and nobody
       # heard; Ruckus kept telling Mo "the engineer's on it").
       - name: Tell Ruckus's channel the engineer started
-        if: ${{ secrets.VESTLAUNCH_CRON_SECRET != '' }}
-        env:
-          CRON_SECRET: ${{ secrets.VESTLAUNCH_CRON_SECRET }}
+        if: ${{ env.CRON_SECRET != '' }}
         run: |
           curl -s -X POST "https://crm.vestlaunch.com/api/ringcentral/ruckus-send" \
             -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: application/json" \
@@ -107,15 +109,13 @@ jobs:
             --max-turns ${{ inputs.smoke == 'true' && '3' || '150' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          CRON_SECRET: ${{ secrets.VESTLAUNCH_CRON_SECRET }}
 
       # Whatever happened, the channel hears the outcome. The engineer's own
       # completion note (engineer-prompt.md) covers the happy path; this covers
       # the engineer never getting that far.
       - name: Tell Ruckus's channel how it ended
-        if: ${{ always() && secrets.VESTLAUNCH_CRON_SECRET != '' }}
+        if: ${{ always() && env.CRON_SECRET != '' }}
         env:
-          CRON_SECRET: ${{ secrets.VESTLAUNCH_CRON_SECRET }}
           OUTCOME: ${{ steps.engineer.outcome }}
         run: |
           if [ "$OUTCOME" = "success" ]; then

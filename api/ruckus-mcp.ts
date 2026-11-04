@@ -631,7 +631,12 @@ const ENGINEER_TOOL_DESC =
   "Args: { worker, requested_by, request_quote, diagnosis?, error_text? } — pass the diagnosis " +
   "kind/recommendation and the error text from ruckus_diagnose_worker so the engineer starts with " +
   "evidence. Returns { ok, dispatched, runsUrl } or a refusal reason. After dispatching, tell the " +
-  "requester the engineer is on it and roughly when to expect the proposal.";
+  "requester the engineer is on it and roughly when to expect the proposal, AND in the same turn " +
+  "schedule your own check (ruckus_schedule once, ~35 minutes out) that posts the outcome either " +
+  "way: the channel gets a '🔧 [Engineer] started' note and a '✅ finished' / '❌ FAILED' note from " +
+  "the run itself; if neither arrived by your check, the dispatch died — say so, do not say the " +
+  "engineer is still on it. The engineer only sees the vestlaunch-mcp code; a bug that lives in " +
+  "ffl-crm or on the VPS comes back as an issue naming it, which a person then owns.";
 
 const ENGINEER_TOOL_SCHEMA = {
   type: "object" as const,
@@ -739,9 +744,10 @@ async function ruckusCallEngineer(
     label: DIAGNOSE_WORKERS[worker].label,
     runsUrl: `https://github.com/${ENGINEER_REPO}/actions/workflows/${ENGINEER_WORKFLOW_FILE}`,
     note:
-      "Engineer dispatched. Expect a fix PR or a needs-human issue in roughly 15-30 minutes; it " +
-      "posts a note to this channel when done (if notification is configured). Do not re-dispatch " +
-      "for this same incident.",
+      "Engineer dispatched. Expect a fix PR or a needs-human issue in roughly 15-30 minutes. The run " +
+      "posts '🔧 started' now and '✅ finished' or '❌ FAILED' to this channel when it ends. Schedule " +
+      "a once check ~35 minutes out that reports either way; if no '✅'/'❌' note arrived by then, " +
+      "the dispatch died: say so. Do not re-dispatch for this same incident while a run is open.",
   };
 }
 

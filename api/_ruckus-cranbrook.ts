@@ -96,10 +96,16 @@ export async function loadCranbrookTools(): Promise<CranbrookTool[]> {
   try {
     const me = (await crmCall("GET", "/api/v1/me", {}, key)) as { data?: { capabilities?: ManifestTool[] } } | null;
     const caps = me?.data?.capabilities ?? [];
-    return buildCranbrookTools(caps);
+    return withExtraTools(buildCranbrookTools(caps));
   } catch {
     return [];
   }
+}
+
+/** Pure: add the smart tools the manifest does not list (a manifest entry of the same name wins). */
+export function withExtraTools(tools: CranbrookTool[]): CranbrookTool[] {
+  const have = new Set(tools.map((t) => t.name));
+  return [...tools, ...EXTRA_TOOLS.filter((t) => !have.has(t.name))];
 }
 
 /** Pure: manifest → cranbrook_* tools (everything but deletes and administration). */
@@ -125,6 +131,42 @@ export function buildCranbrookTools(caps: ManifestTool[]): CranbrookTool[] {
   }
   return out;
 }
+
+/**
+ * Smart tools the CRM manifest does not list (2026-11-06): the leasing triage pair. Ruckus
+ * only had them through the shared FFL key, which the CRM refuses for Cranbrook ("This API
+ * key belongs to another business"), so it could read the Cranbrook "needs a person" list
+ * but never clear an item a person had handled, and the morning list only grew.
+ */
+export const EXTRA_TOOLS: CranbrookTool[] = [
+  {
+    name: `${PREFIX}get_leasing_triage`,
+    description:
+      "CRANBROOK FOREST — the AI leasing agent's triage state, read-only: every open needs-a-person row (with repeat counts), past tours still missing a Toured/No-show outcome, and a short card per conversation. Cranbrook information may be posted only in your main channel (Mo + Yuliana) or the Cranbrook onsite chat, never in Sam's sales chat.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    path: "/api/v1/analytics/leasing-triage",
+    method: "GET",
+  },
+  {
+    name: `${PREFIX}act_leasing_triage`,
+    description:
+      "[WRITE] CRANBROOK FOREST — one triage action on a leasing conversation. action='resolve' clears its open needs-a-person row(s) once a PERSON has handled it (say who did what in reason, e.g. 'Irene called back 11/6 4:14 PM, left a voicemail'); never resolve just to tidy a list. action='escalate' files one deduped needs-a-person row. It can never message a renter.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["escalate", "resolve"], description: "What to do." },
+        conversationId: { type: "string", description: "The leasing conversation id." },
+        reason: { type: "string", description: "For resolve: who handled it and how. For escalate: who should do what by when." },
+        category: { type: "string", description: "Optional short category slug." },
+        urgency: { type: "string", enum: ["normal", "urgent"], description: "Default normal." },
+      },
+      required: ["action", "conversationId", "reason"],
+      additionalProperties: false,
+    },
+    path: "/api/v1/analytics/leasing-triage",
+    method: "POST",
+  },
+];
 
 export function isCranbrookTool(name: string): boolean {
   return name.startsWith(PREFIX) && name.length > PREFIX.length;

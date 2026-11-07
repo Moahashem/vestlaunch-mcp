@@ -1037,6 +1037,14 @@ function baseUrl(): string {
   return "https://crm.vestlaunch.com";
 }
 
+/** Pure: the token to retry a refused post with, or null (no retry). */
+export function sendFallbackToken(used: string, status: number, envToken: string | undefined): string | null {
+  const env = (envToken ?? "").trim();
+  if (status !== 401 && status !== 403) return null;
+  if (!env || env === used.trim()) return null;
+  return env;
+}
+
 async function ruckusSend(args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
   const text = typeof args.text === "string" ? args.text.trim() : "";
   if (!text) throw new Error("ruckus_send requires a non-empty 'text'.");
@@ -1061,16 +1069,23 @@ async function ruckusSend(args: Record<string, unknown>, forwardToken?: string):
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${baseUrl()}/api/ringcentral/ruckus-send`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "User-Agent": "ruckus-mcp-http/0.1.0",
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    const post = (bearer: string) =>
+      fetch(`${baseUrl()}/api/ringcentral/ruckus-send`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bearer}`,
+          "Content-Type": "application/json",
+          "User-Agent": "ruckus-mcp-http/0.1.0",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    let res = await post(token);
+    // 2026-11-06: the CRM's CRON_SECRET was rotated and the vault credential kept the old one,
+    // so every post was refused for five hours. If the presented bearer is refused and this
+    // server holds a different token, try that one once before giving up.
+    const fallback = sendFallbackToken(token, res.status, process.env.RUCKUS_SEND_TOKEN);
+    if (fallback) res = await post(fallback);
     const out = await res.text();
     let json: unknown = null;
     try {

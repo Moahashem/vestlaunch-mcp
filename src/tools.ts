@@ -13,6 +13,7 @@
  */
 
 import type { ApiClient, HttpMethod } from "./api-client.js";
+import { confineArguments, isExecutableHiddenAsRead, isForbiddenCapability, parseCallerIdentity } from "./mcp-authz.js";
 import type { ManifestTool } from "./manifest.js";
 import { extractPathParams, substitutePath } from "./manifest.js";
 
@@ -77,6 +78,7 @@ export function buildToolDefinition(
   tool: ManifestTool,
   opts: BuildOptions,
 ): McpToolDefinition | null {
+  if (isForbiddenCapability(tool) || isExecutableHiddenAsRead(tool)) return null;
   const isWrite = WRITE_METHODS.includes(tool.method);
   if (isWrite && !opts.enableWrites) return null;
   if (opts.blockAdmin && isAdminTool(tool)) return null;
@@ -184,7 +186,15 @@ export async function executeTool(
   client: ApiClient,
   def: McpToolDefinition,
   rawInput: Record<string, unknown>,
+  identityRaw?: unknown,
 ): Promise<unknown> {
+  const confined = confineArguments(
+    parseCallerIdentity(identityRaw),
+    rawInput,
+    def.meta.flat ? "top" : "query",
+  );
+  if (!confined.ok) throw new Error(confined.reason);
+  rawInput = confined.args;
   const pathParams = extractPathParams(def.meta.pathTemplate);
   const paramValues: Record<string, string> = {};
   for (const param of pathParams) {

@@ -129,7 +129,12 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
       };
     }
     try {
-      const result = await executeTool(client, def, (rawArgs ?? {}) as Record<string, unknown>);
+      const result = await executeTool(
+        client,
+        def,
+        (rawArgs ?? {}) as Record<string, unknown>,
+        manifest.identity,
+      );
       return {
         content: [
           {

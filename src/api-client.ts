@@ -8,6 +8,7 @@
 
 import type { Config } from "./config.js";
 import { log } from "./log.js";
+import { redactSecrets } from "./mcp-authz.js";
 
 export interface ApiSuccess<T = unknown> {
   success: true;
@@ -94,7 +95,7 @@ export class ApiClient {
         ...meta,
       } as ApiSuccess<T>;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactSecrets(err instanceof Error ? err.message : String(err));
       log.error(`request failed: ${msg}`, { path: opts.path });
       return {
         success: false,
@@ -133,7 +134,7 @@ export class ApiClient {
   private extractError(json: unknown): string | undefined {
     if (json && typeof json === "object" && "error" in json) {
       const e = (json as Record<string, unknown>).error;
-      return typeof e === "string" ? e : undefined;
+      return typeof e === "string" ? redactSecrets(e) : undefined;
     }
     return undefined;
   }

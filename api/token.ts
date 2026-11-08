@@ -31,6 +31,7 @@ import {
   mintRefreshToken,
   readAuthCode,
   readRefreshToken,
+  validateCrmKey,
   verifyPkce,
 } from "./_oauth";
 
@@ -58,6 +59,21 @@ function sendError(
   res.setHeader("cache-control", "no-store");
   res.setHeader("pragma", "no-cache");
   res.end(JSON.stringify({ error, ...(description ? { error_description: description } : {}) }));
+}
+
+/**
+ * A refresh token (and an authorization code) carries the CRM key inside the
+ * JWE. Decrypting it is not enough: the key may have been revoked since it
+ * was wrapped. Fail closed — a CRM outage does not mint a fresh token.
+ * The key itself is never written into the error.
+ */
+async function crmKeyStillValid(crmKey: string): Promise<boolean> {
+  try {
+    const check = await validateCrmKey(crmKey);
+    return check.ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Send a successful token response. */
@@ -143,6 +159,11 @@ export default async function handler(
       return;
     }
 
+    if (!(await crmKeyStillValid(payload.crmKey))) {
+      sendError(res, 400, "invalid_grant", "This sign-in is no longer valid. Reconnect.");
+      return;
+    }
+
     const accessToken = await mintAccessToken(
       { crmKey: payload.crmKey, clientId: payload.clientId, scope: payload.scope },
       req,
@@ -168,6 +189,11 @@ export default async function handler(
       payload = await readRefreshToken(token);
     } catch {
       sendError(res, 400, "invalid_grant", "The refresh token is invalid or expired.");
+      return;
+    }
+
+    if (!(await crmKeyStillValid(payload.crmKey))) {
+      sendError(res, 400, "invalid_grant", "This sign-in is no longer valid. Reconnect.");
       return;
     }
 

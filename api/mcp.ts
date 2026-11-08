@@ -79,6 +79,18 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { readAccessToken } from "./_oauth";
 import { reportWorkComplete, WORK_COMPLETE_PREFIX } from "./workforce-hub";
 import {
+  auditRecord,
+  confineArguments,
+  exposeTool,
+  parseCallerIdentity,
+  permitManifestTool,
+  permitOwnerBillingAction,
+  permitTool,
+  redactSecrets,
+  ruleFor,
+  type CallerIdentity,
+} from "../src/mcp-authz";
+import {
   APPFOLIO_ENTRY_TOOLS,
   APPFOLIO_ENTRY_TOOL_NAMES,
   appfolioEntryToolsEnabled,
@@ -198,13 +210,13 @@ async function crmRequest<T = unknown>(
         json && typeof json === "object" && typeof (json as Record<string, unknown>).error === "string"
           ? ((json as Record<string, unknown>).error as string)
           : `HTTP ${res.status} ${res.statusText}`;
-      return { success: false, error: err, statusCode: res.status };
+      return { success: false, error: redactSecrets(err), statusCode: res.status };
     }
     const b = (json ?? {}) as Record<string, unknown>;
     const meta = (b.meta && typeof b.meta === "object" ? b.meta : {}) as Record<string, unknown>;
     return { success: true, data: (b.data === undefined ? null : b.data) as T, ...meta };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err), statusCode: 0 };
+    return { success: false, error: redactSecrets(err instanceof Error ? err.message : String(err)), statusCode: 0 };
   } finally {
     clearTimeout(timer);
   }
@@ -233,7 +245,7 @@ interface ToolDef {
     required?: string[];
     additionalProperties: boolean;
   };
-  meta: { method: HttpMethod; pathTemplate: string; isWrite: boolean; flat: boolean };
+  meta: { method: HttpMethod; pathTemplate: string; scope: string; isWrite: boolean; flat: boolean };
 }
 
 const WRITE_METHODS: ReadonlyArray<HttpMethod> = ["POST", "PATCH", "PUT", "DELETE"];
@@ -286,7 +298,7 @@ function buildToolDef(
         required: req.length > 0 ? req : undefined,
         additionalProperties: schema.additionalProperties === true,
       },
-      meta: { method: tool.method, pathTemplate: tool.path, isWrite, flat: true },
+      meta: { method: tool.method, pathTemplate: tool.path, scope: tool.scope, isWrite, flat: true },
     };
   }
   const params = pathParams(tool.path);
@@ -314,11 +326,19 @@ function buildToolDef(
       required: required.length > 0 ? required : undefined,
       additionalProperties: false,
     },
-    meta: { method: tool.method, pathTemplate: tool.path, isWrite, flat: false },
+    meta: { method: tool.method, pathTemplate: tool.path, scope: tool.scope, isWrite, flat: false },
   };
 }
 
-async function executeTool(cfg: Cfg, def: ToolDef, raw: Record<string, unknown>): Promise<unknown> {
+async function executeTool(
+  cfg: Cfg,
+  def: ToolDef,
+  raw: Record<string, unknown>,
+  identity: CallerIdentity,
+): Promise<unknown> {
+  const confined = confineArguments(identity, raw, def.meta.flat ? "top" : "query");
+  if (!confined.ok) throw new Error(confined.reason);
+  raw = confined.args;
   const params = pathParams(def.meta.pathTemplate);
   const pv: Record<string, string> = {};
   for (const p of params) {
@@ -1175,8 +1195,8 @@ const LEASING_TRIAGE_ACT_TOOL_DESC =
   "Amiyai today; opted out of SMS, phone is the only channel'). action='resolve' dissolves the " +
   "open needs-a-human row(s) for a conversation whose work is confirmed done — never resolve to " +
   "tidy a list. This tool can NEVER message a renter, close a conversation, or record a tour " +
-  "outcome. Requires ffl-crm POST /api/v1/analytics/leasing-triage deployed and the Bearer key to " +
-  "have scope properties:read (or *).";
+  "outcome. [WRITE] Requires ffl-crm POST /api/v1/analytics/leasing-triage deployed and the Bearer key to " +
+  "have scope leasing:write (or *). properties:read does not authorize this call.";
 const LEASING_TRIAGE_ACT_TOOL_SCHEMA = {
   type: "object" as const,
   properties: {
@@ -1212,7 +1232,7 @@ async function actLeasingTriage(cfg: Cfg, rawArgs: Record<string, unknown>): Pro
     throw new Error(
       `leasing-triage POST failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
         "This tool requires POST /api/v1/analytics/leasing-triage (ffl-crm) to be deployed " +
-        "and the Bearer key to have scope properties:read (or *).",
+        "and the Bearer key to have scope leasing:write (or *).",
     );
   }
   return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-triage" };
@@ -1504,8 +1524,8 @@ const OFFICE_CLOSURE_SET_TOOL_DESC =
   "YYYY-MM-DD in America/Chicago — compute it from today's date, never guess; past dates are refused. " +
   "What this CANNOT do: block the day in Calendly itself (no API for that) — always tell the human " +
   "that step remains: Calendly → cfa-tour → Availability → Date overrides. Cranbrook tours are " +
-  "Calendly, never ShowMojo. Requires ffl-crm POST /api/v1/analytics/leasing-office-closures and " +
-  "Bearer scope properties:read (or *).";
+  "Calendly, never ShowMojo. [WRITE] Requires ffl-crm POST /api/v1/analytics/leasing-office-closures and " +
+  "Bearer scope leasing:write (or *). properties:read does not authorize this call.";
 const OFFICE_CLOSURE_SET_TOOL_SCHEMA = {
   type: "object" as const,
   properties: {
@@ -1536,7 +1556,7 @@ async function setOfficeClosure(cfg: Cfg, rawArgs: Record<string, unknown>): Pro
     throw new Error(
       `leasing-office-closures POST failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
         "This tool requires POST /api/v1/analytics/leasing-office-closures (ffl-crm) to be deployed " +
-        "and the Bearer key to have scope properties:read (or *).",
+        "and the Bearer key to have scope leasing:write (or *).",
     );
   }
   return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-office-closures" };
@@ -1762,8 +1782,10 @@ const OWNER_BILLING_TOOL_DESC =
   "'Insurance or special project', 'Not our charge', or 'Other' with a note) and by (who asked). " +
   "scope='item' (just this item, default) or 'home' (never flag this kind of charge on this home again). " +
   "Only do this when a person in the chat clearly asked; confirm back what was removed. " +
-  "action=undo: put a decision back (decision_id from list with decided=true). Billing needs no action: " +
-  "items drop off on the next run once AppFolio shows the charge. Never changes AppFolio.";
+  "action=undo: put a decision back (decision_id from list with decided=true). [WRITE] dont_charge and " +
+  "undo change the billing list and require properties:write (or *); properties:read can only list. " +
+  "Billing needs no action: items drop off on the next run once AppFolio shows the charge. Never changes AppFolio. " +
+  "This tool does not pay anyone and does not bypass the billing controls in the CRM.";
 const OWNER_BILLING_TOOL_SCHEMA = {
   type: "object" as const,
   properties: {
@@ -1830,6 +1852,9 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const data = me.data ?? {};
   const caps = Array.isArray(data.capabilities) ? data.capabilities : [];
   const scopes = data.identity?.scopes ?? [];
+  const identity = parseCallerIdentity(data.identity);
+  const shown = (toolName: string) =>
+    exposeTool(toolName, toolFilter, identity, { enableWrites: cfg.enableWrites });
   const tools = caps.filter(
     (t): t is ManifestTool =>
       !!t &&
@@ -1846,46 +1871,53 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   for (const t of tools) {
     if (toolFilter && !toolFilter.has(t.name)) continue;
     const d = buildToolDef(t, cfg, scopes);
-    if (d) defs.push(d);
+    if (!d) continue;
+    const allowed = permitManifestTool(
+      identity,
+      { name: t.name, method: t.method, path: t.path, scope: t.scope },
+      { enableWrites: cfg.enableWrites },
+    );
+    if (allowed.ok) defs.push(d);
   }
   const byName = new Map<string, ToolDef>();
   for (const d of defs) byName.set(d.name, d);
 
-  const includeCountTool = !toolFilter || toolFilter.has(COUNT_TOOL_NAME);
-  const includeFflOccTool = !toolFilter || toolFilter.has(FFL_OCC_TOOL_NAME);
-  const includeFflGuestCardTool = !toolFilter || toolFilter.has(FFL_GUESTCARD_TOOL_NAME);
-  const includeFflRenTool = !toolFilter || toolFilter.has(FFL_REN_TOOL_NAME);
-  const includeFflDelTool = !toolFilter || toolFilter.has(FFL_DEL_TOOL_NAME);
-  const includeDelWorklistTool = !toolFilter || toolFilter.has(DEL_WORKLIST_TOOL_NAME);
-  const includeFflHomesTool = !toolFilter || toolFilter.has(FFL_HOMES_TOOL_NAME);
-  const includeFflOnboardingTool = !toolFilter || toolFilter.has(FFL_ONBOARDING_TOOL_NAME);
-  const includeFflChurnTool = !toolFilter || toolFilter.has(FFL_CHURN_TOOL_NAME);
-  const includeFflLeasingTool = !toolFilter || toolFilter.has(FFL_LEASING_TOOL_NAME);
-  const includeFflSalesCallsTool = !toolFilter || toolFilter.has(FFL_SALES_TOOL_NAME);
-  const includeCfaTool = !toolFilter || toolFilter.has(CFA_TOOL_NAME);
-  const includeLeasingTriageTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_TOOL_NAME);
-  const includeLeasingTriageActTool = !toolFilter || toolFilter.has(LEASING_TRIAGE_ACT_TOOL_NAME);
-  const includeTourOutcomeTool = !toolFilter || toolFilter.has(TOUR_OUTCOME_TOOL_NAME);
-  const includeCloseLostTool = !toolFilter || toolFilter.has(CLOSE_LOST_TOOL_NAME);
-  const includeOfficeClosuresTool = !toolFilter || toolFilter.has(OFFICE_CLOSURES_TOOL_NAME);
-  const includeOfficeClosureSetTool = !toolFilter || toolFilter.has(OFFICE_CLOSURE_SET_TOOL_NAME);
-  const includeCfLeadsTool = !toolFilter || toolFilter.has(CF_LEADS_TOOL_NAME);
-  const includeSignupsTool = !toolFilter || toolFilter.has(FFL_SIGNUPS_TOOL_NAME);
-  const includeHuddleTool = !toolFilter || toolFilter.has(FFL_HUDDLE_TOOL_NAME);
-  const includeHudAfTool = !toolFilter || toolFilter.has(FFL_HUDAF_TOOL_NAME);
-  const includeAfLedgerTool = !toolFilter || toolFilter.has(AF_LEDGER_TOOL_NAME);
-  const includeOwnerBillingTool = !toolFilter || toolFilter.has(OWNER_BILLING_TOOL_NAME);
+  const includeCountTool = shown(COUNT_TOOL_NAME);
+  const includeFflOccTool = shown(FFL_OCC_TOOL_NAME);
+  const includeFflGuestCardTool = shown(FFL_GUESTCARD_TOOL_NAME);
+  const includeFflRenTool = shown(FFL_REN_TOOL_NAME);
+  const includeFflDelTool = shown(FFL_DEL_TOOL_NAME);
+  const includeDelWorklistTool = shown(DEL_WORKLIST_TOOL_NAME);
+  const includeFflHomesTool = shown(FFL_HOMES_TOOL_NAME);
+  const includeFflOnboardingTool = shown(FFL_ONBOARDING_TOOL_NAME);
+  const includeFflChurnTool = shown(FFL_CHURN_TOOL_NAME);
+  const includeFflLeasingTool = shown(FFL_LEASING_TOOL_NAME);
+  const includeFflSalesCallsTool = shown(FFL_SALES_TOOL_NAME);
+  const includeCfaTool = shown(CFA_TOOL_NAME);
+  const includeLeasingTriageTool = shown(LEASING_TRIAGE_TOOL_NAME);
+  const includeLeasingTriageActTool = shown(LEASING_TRIAGE_ACT_TOOL_NAME);
+  const includeTourOutcomeTool = shown(TOUR_OUTCOME_TOOL_NAME);
+  const includeCloseLostTool = shown(CLOSE_LOST_TOOL_NAME);
+  const includeOfficeClosuresTool = shown(OFFICE_CLOSURES_TOOL_NAME);
+  const includeOfficeClosureSetTool = shown(OFFICE_CLOSURE_SET_TOOL_NAME);
+  const includeCfLeadsTool = shown(CF_LEADS_TOOL_NAME);
+  const includeSignupsTool = shown(FFL_SIGNUPS_TOOL_NAME);
+  const includeHuddleTool = shown(FFL_HUDDLE_TOOL_NAME);
+  const includeHudAfTool = shown(FFL_HUDAF_TOOL_NAME);
+  const includeAfLedgerTool = shown(AF_LEDGER_TOOL_NAME);
+  const includeOwnerBillingTool = shown(OWNER_BILLING_TOOL_NAME);
   // report_run_complete writes to the hub via the server's own key, so it is
   // exposed only to callers whose OWN key carries agent:write (or *).
-  const includeRunCompleteTool =
-    hasScope("agent:write", scopes) && (!toolFilter || toolFilter.has(RUN_COMPLETE_TOOL_NAME));
+  const includeRunCompleteTool = shown(RUN_COMPLETE_TOOL_NAME);
 
   // AppFolio entry-agent smart tools (Phase 3, owner onboarding). They proxy
   // a PRIVILEGED token (never the caller's key), so exposure requires BOTH:
   // the token configured here AND the caller's own key carrying agent:write
   // (or *) — the ?tools= filter is cosmetic and grants nothing.
   const appfolioAuthorized =
-    appfolioEntryToolsEnabled() && hasScope(APPFOLIO_ENTRY_REQUIRED_SCOPE, scopes);
+    appfolioEntryToolsEnabled() &&
+    hasScope(APPFOLIO_ENTRY_REQUIRED_SCOPE, scopes) &&
+    permitTool(identity, "appfolio_entry_claim", { enableWrites: cfg.enableWrites }).ok;
   const appfolioTools = appfolioAuthorized
     ? APPFOLIO_ENTRY_TOOLS.filter((t) => !toolFilter || toolFilter.has(t.name))
     : [];
@@ -1978,7 +2010,51 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const { name, arguments: rawArgs } = req.params;
+    const { name } = req.params;
+    const supplied = (req.params.arguments ?? {}) as Record<string, unknown>;
+    const manifestDef = byName.get(name);
+    let decision: { ok: true } | { ok: false; reason: string } = { ok: true };
+    let rawArgs: Record<string, unknown> = supplied;
+    if (manifestDef) {
+      decision = permitManifestTool(
+        identity,
+        {
+          name: manifestDef.name,
+          method: manifestDef.meta.method,
+          path: manifestDef.meta.pathTemplate,
+          scope: manifestDef.meta.scope,
+        },
+        { enableWrites: cfg.enableWrites },
+      );
+      if (decision.ok) {
+        const confined = confineArguments(identity, supplied, manifestDef.meta.flat ? "top" : "query");
+        if (!confined.ok) decision = confined;
+        else rawArgs = confined.args;
+      }
+    } else if (ruleFor(name)) {
+      decision =
+        name === OWNER_BILLING_TOOL_NAME
+          ? permitOwnerBillingAction(identity, supplied, cfg.enableWrites)
+          : permitTool(identity, name, { enableWrites: cfg.enableWrites });
+      if (decision.ok) {
+        const confined = confineArguments(
+          identity,
+          supplied,
+          "none",
+          ruleFor(name)?.business ?? "any",
+        );
+        if (!confined.ok) decision = confined;
+        else rawArgs = confined.args;
+      }
+    }
+    if (!decision.ok) {
+      const record = auditRecord({ identity, tool: name, decision: "deny", reason: decision.reason });
+      process.stderr.write(`vestlaunch-mcp audit ${JSON.stringify(record)}\n`);
+      return {
+        content: [{ type: "text", text: redactSecrets(decision.reason) }],
+        isError: true,
+      };
+    }
 
     if (APPFOLIO_ENTRY_TOOL_NAMES.has(name)) {
       if (!appfolioTools.some((t) => t.name === name)) {
@@ -2430,7 +2506,7 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
       return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
     try {
-      const result = await executeTool(cfg, def, (rawArgs ?? {}) as Record<string, unknown>);
+      const result = await executeTool(cfg, def, rawArgs, identity);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {
@@ -2669,7 +2745,7 @@ export default async function handler(
     }
     sendJson(res, 500, {
       jsonrpc: "2.0",
-      error: { code: -32002, message: `MCP server init failed: ${err instanceof Error ? err.message : String(err)}` },
+      error: { code: -32002, message: redactSecrets(`MCP server init failed: ${err instanceof Error ? err.message : String(err)}`) },
       id: null,
     });
     return;

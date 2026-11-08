@@ -306,12 +306,62 @@ function decide(identity: CallerIdentity, tool: ToolRule, enableWrites: boolean)
   return { ok: true };
 }
 
+/**
+ * Server-owned onboarding surface for a new scoped key.
+ * Nothing here reads or writes CRM business records. A route is added only
+ * after the CRM reviewer attests it. `?tools=` cannot add to this list.
+ */
+export const CONNECTION_STATUS_TOOL = {
+  name: "connection_status",
+  method: "GET",
+  path: "mcp://connection-status",
+} as const;
+
+export const ONBOARDING_ALLOWLIST: readonly { name: string; method: string; path: string }[] = [
+  CONNECTION_STATUS_TOOL,
+];
+
+export function onboardingAllows(tool: { name: string; method: string; path: string }): boolean {
+  return ONBOARDING_ALLOWLIST.some(
+    (entry) => entry.name === tool.name && entry.method === tool.method && entry.path === tool.path,
+  );
+}
+
+export function connectionStatusPayload(identity: CallerIdentity): Record<string, unknown> {
+  return {
+    profile: "onboarding",
+    authority: identity.authority,
+    businesses: identity.businesses,
+    workspaceIds: identity.workspaceIds,
+    scopes: identity.scopes,
+    allowlist: ONBOARDING_ALLOWLIST.map((entry) => ({ ...entry, clearsData: false })),
+    dataRoutesCleared: [],
+  };
+}
+
+function scopedAllowlist(
+  identity: CallerIdentity,
+  tool: { name: string; method: string; path: string },
+): Decision | null {
+  if (identity.authority !== "scoped") return null;
+  if (!identity.authorityOk) {
+    return { ok: false, reason: identity.authorityError ?? "This agent's CRM identity has no business authority." };
+  }
+  if (!onboardingAllows(tool)) {
+    return { ok: false, reason: "This tool is not on the onboarding allowlist." };
+  }
+  return { ok: true };
+}
+
 /** Whether a synthetic tool may be listed or called. The URL `?tools=` filter is not an input. */
 export function permitTool(
   identity: CallerIdentity,
   name: string,
   opts: { enableWrites: boolean },
 ): Decision {
+  if (identity.authority === "scoped") {
+    return { ok: false, reason: "This tool is not on the onboarding allowlist." };
+  }
   const tool = ruleFor(name);
   if (!tool) return { ok: false, reason: "Unknown tool." };
   if (name === "owner_billing") {
@@ -348,6 +398,9 @@ export function permitOwnerBillingAction(
   args: Record<string, unknown>,
   enableWrites: boolean,
 ): Decision {
+  if (identity.authority === "scoped") {
+    return { ok: false, reason: "This tool is not on the onboarding allowlist." };
+  }
   const action = typeof args.action === "string" && args.action.trim() ? args.action.trim() : "list";
   if (action === "list") return permitTool(identity, "owner_billing", { enableWrites });
   if (!OWNER_BILLING_WRITES.has(action)) {
@@ -409,6 +462,8 @@ export function permitManifestTool(
   tool: ManifestCapability,
   opts: { enableWrites: boolean },
 ): Decision {
+  const surface = scopedAllowlist(identity, tool);
+  if (surface && !surface.ok) return surface;
   if (isForbiddenCapability(tool)) {
     return { ok: false, reason: "This server does not expose that capability." };
   }
@@ -438,22 +493,24 @@ type SelectorKind = "workspace" | "business" | "tenant";
 
 interface SelectorHit {
   kind: SelectorKind;
-  value: string;
+  plural: boolean;
+  key: string;
+  value: unknown;
+  parent: Record<string, unknown>;
 }
 
-/** workspaceId, workspace_id, Workspace-Id, businessId, tenant_id, and the same without "id". */
-function selectorKind(key: string): SelectorKind | null {
+/** The key is a selector even when the value is an object, an array, or null. */
+function selectorKind(key: string): { kind: SelectorKind; plural: boolean } | null {
   const flat = key.replace(/[_-]/g, "").toLowerCase();
-  if (flat === "workspaceid" || flat === "workspace") return "workspace";
-  if (flat === "businessid" || flat === "business") return "business";
-  if (flat === "tenantid" || flat === "tenant") return "tenant";
+  if (flat === "workspaceid" || flat === "workspace") return { kind: "workspace", plural: false };
+  if (flat === "workspaceids" || flat === "workspaces") return { kind: "workspace", plural: true };
+  if (flat === "businessid" || flat === "business") return { kind: "business", plural: false };
+  if (flat === "businessids" || flat === "businesses") return { kind: "business", plural: true };
+  if (flat === "tenantid" || flat === "tenant") return { kind: "tenant", plural: false };
+  if (flat === "tenantids" || flat === "tenants") return { kind: "tenant", plural: true };
   return null;
 }
 
-/**
- * Returns the selectors found, or `too-deep` when a value sits past the budget.
- * Stopping early and forwarding the rest would hide a nested selector.
- */
 function walkSelectors(node: unknown, hits: SelectorHit[], depth: number): "ok" | "too-deep" {
   if (depth > SELECTOR_DEPTH_BUDGET) return "too-deep";
   if (Array.isArray(node)) {
@@ -466,17 +523,7 @@ function walkSelectors(node: unknown, hits: SelectorHit[], depth: number): "ok" 
   for (const [key, value] of Object.entries(node)) {
     const kind = selectorKind(key);
     if (kind) {
-      const values = Array.isArray(value) ? value : [value];
-      for (const item of values) {
-        if (isObj(item) || Array.isArray(item)) {
-          if (walkSelectors(item, hits, depth + 1) === "too-deep") return "too-deep";
-          continue;
-        }
-        hits.push({
-          kind,
-          value: item === undefined || item === null ? "" : String(item).trim(),
-        });
-      }
+      hits.push({ kind: kind.kind, plural: kind.plural, key, value, parent: node });
       continue;
     }
     if (isObj(value) || Array.isArray(value)) {
@@ -485,6 +532,10 @@ function walkSelectors(node: unknown, hits: SelectorHit[], depth: number): "ok" 
     }
   }
   return "ok";
+}
+
+function stripSelectors(hits: SelectorHit[]): void {
+  for (const hit of hits) delete hit.parent[hit.key];
 }
 
 /**
@@ -515,46 +566,68 @@ export function confineArguments(
   }
 
   const allowed = new Set(identity.workspaceIds);
+  const chosen = new Set<string>();
   for (const hit of hits) {
+    if (hit.plural || typeof hit.value !== "string") {
+      return { ok: false, reason: "A workspace, business, or tenant selector must be one allowlisted id." };
+    }
     if (hit.kind !== "workspace") {
       return { ok: false, reason: "A caller cannot set business or tenant. The CRM key decides that." };
     }
-    if (WIDEN.has(hit.value.toLowerCase()) || BUSINESS_TOKENS.has(hit.value)) {
-      return { ok: false, reason: "A workspace alias is not an authorized workspace id." };
-    }
-    if (!allowed.has(hit.value)) {
+    const value = hit.value.trim();
+    if (WIDEN.has(value.toLowerCase()) || BUSINESS_TOKENS.has(value) || !allowed.has(value)) {
       return { ok: false, reason: "This agent's key is not authorized for that workspace." };
     }
+    chosen.add(value);
   }
-  if (new Set(hits.map((hit) => hit.value)).size > 1) {
+  if (chosen.size > 1) {
     return { ok: false, reason: "This agent's key is not authorized for that workspace." };
   }
 
+  stripSelectors(hits);
   const pinned = identity.workspaceIds.length === 1 ? identity.workspaceIds[0] : undefined;
-  if (where !== "none" && identity.authority === "scoped" && identity.workspaceIds.length > 1 && hits.length === 0) {
+  const selected = chosen.size === 1 ? [...chosen][0] : undefined;
+  if (where !== "none" && identity.workspaceIds.length > 1 && !selected) {
     return { ok: false, reason: "This key has more than one workspace. Name the one authorized workspace id." };
   }
-  if (where !== "none" && pinned && hits.length === 0) {
+  const canonical = selected ?? pinned;
+  if (canonical) {
     if (where === "query") {
       const query = isObj(copy.query) ? copy.query : {};
-      query.workspaceId = pinned;
+      query.workspaceId = canonical;
       copy.query = query;
     } else {
-      copy.workspaceId = pinned;
+      copy.workspaceId = canonical;
     }
   }
   return { ok: true, args: copy };
 }
 
-/** Remove credential material from text that might be logged or returned. */
+const CREDENTIAL_KEY = /^(authorization|proxyauthorization|apikey|token|accesstoken|refreshtoken|idtoken|secret|password|crmkey|bearer|cookie|setcookie|jwt|privatekey|clientsecret)$/;
+
+function isCredentialKey(key: string): boolean {
+  return CREDENTIAL_KEY.test(key.replace(/[_-]/g, "").toLowerCase());
+}
+
+/** Prefix and bearer redaction. Does not treat record ids or UUIDs as secrets. */
 export function redactSecrets(text: string): string {
   return text
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "[jwt redacted]")
     .replace(/ffl_[a-z0-9]+_[A-Za-z0-9_-]+/gi, "ffl_[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
     .replace(/\bsk_(?:live|test)_[A-Za-z0-9_-]+/g, "sk_[redacted]")
-    .replace(/\bsk-ant-[A-Za-z0-9_-]+/g, "sk-ant-[redacted]")
-    .replace(/\b[A-Za-z0-9]{6,}(?:-[A-Za-z0-9]{4,}){3,}\b/g, "[token redacted]");
+    .replace(/\bsk-ant-[A-Za-z0-9_-]+/g, "sk-ant-[redacted]");
+}
+
+/** Redact credential fields by key, and secret prefixes inside other strings. */
+export function redactStructured(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactStructured(item));
+  if (!isObj(value)) return typeof value === "string" ? redactSecrets(value) : value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    out[key] = isCredentialKey(key) ? "[redacted]" : redactStructured(item);
+  }
+  return out;
 }
 
 export interface AuditRecord {

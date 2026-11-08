@@ -52,6 +52,16 @@ Tools come from `GET /api/v1/me` `capabilities[]`, plus the synthetic tools regi
 - `business`, `businessId`, `tenant`, and `tenantId` cannot select a business. `workspaceId` (any case, underscore, or hyphen) is kept only when it exactly matches one id in `identity.workspaceIds`. `ffl` is not a workspace id. With no list, that filter is denied because there is nothing authoritative to match. Nesting past depth 6 rejects the call. One declared id is pinned when omitted. Two require the caller to name exactly one of them.
 - Deletes stay on `VESTLAUNCH_DELETE_ALLOWLIST` (default `delete_contact`).
 
+### Onboarding allowlist
+
+A scoped key does not receive the manifest or the synthetic tools, no matter which scopes it holds and no matter what `?tools=` says. The server-owned list is only:
+
+| name | method | path | CRM data |
+|---|---|---|---|
+| `connection_status` | GET | `mcp://connection-status` | no |
+
+It reports business, workspace ids, scopes, and that list. `dataRoutesCleared` is empty. No analytics, owner-billing, leasing, voice, sheets, or catalog route is cleared. Adding one is a server change after the CRM reviewer attests that route. A query parameter cannot select a wider profile.
+
 ### Required `data.identity` for a scoped key
 
 ```json

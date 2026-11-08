@@ -90,6 +90,10 @@ import {
   ruleFor,
   scopeGrants,
   formatAudit,
+  connectionStatusPayload,
+  onboardingAllows,
+  redactStructured,
+  CONNECTION_STATUS_TOOL,
   type AuthorityMode,
   type CallerIdentity,
 } from "../src/mcp-authz";
@@ -199,15 +203,16 @@ async function crmRequest<T = unknown>(
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
-    const text = redactSecrets(await res.text());
+    const rawText = await res.text();
     let json: unknown = null;
-    if (text.length > 0) {
+    if (rawText.length > 0) {
       try {
-        json = JSON.parse(text);
+        json = JSON.parse(rawText);
       } catch {
-        json = { error: text };
+        json = { error: redactSecrets(rawText) };
       }
     }
+    json = redactStructured(json);
     if (!res.ok) {
       const err =
         json && typeof json === "object" && typeof (json as Record<string, unknown>).error === "string"
@@ -2014,6 +2019,14 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null, mode: Autho
       ...(includeRunCompleteTool
         ? [{ name: RUN_COMPLETE_TOOL_NAME, description: RUN_COMPLETE_TOOL_DESC, inputSchema: RUN_COMPLETE_TOOL_SCHEMA }]
         : []),
+      ...(identity.authority === "scoped" && identity.authorityOk && (!toolFilter || toolFilter.has(CONNECTION_STATUS_TOOL.name))
+        ? [{
+            name: CONNECTION_STATUS_TOOL.name,
+            description:
+              "Onboarding self-check. Returns this connection's business, workspace ids, scopes, and the server-owned allowlist. No CRM records. A query parameter cannot add tools.",
+            inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
+          }]
+        : []),
       ...appfolioTools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
     ],
   }));
@@ -2046,16 +2059,38 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null, mode: Autho
           ? permitOwnerBillingAction(identity, supplied, cfg.enableWrites)
           : permitTool(identity, name, { enableWrites: cfg.enableWrites });
       if (decision.ok) {
-        const confined = confineArguments(
-          identity,
-          supplied,
-          "none",
-          ruleFor(name)?.business ?? "any",
-        );
+        const confined = confineArguments(identity, supplied, "top", ruleFor(name)?.business ?? "any");
         if (!confined.ok) decision = confined;
         else rawArgs = confined.args;
       }
     }
+    if (name === CONNECTION_STATUS_TOOL.name) {
+      if (identity.authority !== "scoped" || !identity.authorityOk || !onboardingAllows(CONNECTION_STATUS_TOOL)) {
+        const denied = auditRecord({
+          identity,
+          tool: name,
+          decision: "deny",
+          reason: "This tool is not on the onboarding allowlist.",
+        });
+        process.stderr.write(`vestlaunch-mcp audit ${formatAudit(denied)}\n`);
+        return {
+          content: [{ type: "text", text: "This tool is not on the onboarding allowlist." }],
+          isError: true,
+        };
+      }
+      const confined = confineArguments(identity, supplied, "top");
+      if (!confined.ok) {
+        const denied = auditRecord({ identity, tool: name, decision: "deny", reason: confined.reason });
+        process.stderr.write(`vestlaunch-mcp audit ${formatAudit(denied)}\n`);
+        return { content: [{ type: "text", text: redactSecrets(confined.reason) }], isError: true };
+      }
+      const allowed = auditRecord({ identity, tool: name, decision: "allow" });
+      process.stderr.write(`vestlaunch-mcp audit ${formatAudit(allowed)}\n`);
+      return {
+        content: [{ type: "text", text: JSON.stringify(connectionStatusPayload(identity), null, 2) }],
+      };
+    }
+
     const record = auditRecord({
       identity,
       tool: name,

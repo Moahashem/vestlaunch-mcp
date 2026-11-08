@@ -8,9 +8,13 @@ import { buildToolDefinition, executeTool } from "../tools.js";
 import {
   SELECTOR_DEPTH_BUDGET,
   confineArguments,
+  connectionStatusPayload,
+  exposeTool,
+  onboardingAllows,
   parseCallerIdentity,
   permitManifestTool,
   redactSecrets,
+  redactStructured,
   type CallerIdentity,
 } from "../mcp-authz.js";
 
@@ -114,17 +118,73 @@ describe("identity contract", () => {
     const none = scoped({ scopes: [], authorityOk: false, businesses: [], workspaceIds: [] });
     expect(permitManifestTool(none, tool, { enableWrites: true }).ok).toBe(false);
     expect(permitManifestTool(scoped({ scopes: ["contacts:read"] }), tool, { enableWrites: true }).ok).toBe(false);
-    expect(permitManifestTool(scoped({ scopes: ["*"] }), tool, { enableWrites: true }).ok).toBe(true);
+    expect(permitManifestTool(scoped({ scopes: ["*"] }), tool, { enableWrites: true }).ok).toBe(false);
   });
 });
 
-describe("redaction tails", () => {
-  it("redacts ffl_test, a jwt, and a hyphenated token tail", () => {
-    const text = redactSecrets("ffl_test_abc-def-ghi-jkl eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue tail a1b2c3-d4e5-f6a7-b8c9-d0e1f2");
+describe("selector shapes", () => {
+  const bound = scoped();
+
+  it("rejects a plural workspaceIds array even when a single workspace would be pinned", () => {
+    const result = confineArguments(bound, { workspaceIds: ["ws_other", "ws_ffl"], offset: 1 }, "top");
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("ws_other");
+  });
+
+  it("rejects an object workspaceId nested under filters, for scoped and legacy", () => {
+    const nested = { filters: { workspaceId: { in: ["ws_other"] } }, business: { slug: "cranbrook" } };
+    expect(confineArguments(bound, nested, "none").ok).toBe(false);
+    const legacy = confineArguments(
+      { ...bound, authority: "legacy-shared" },
+      { filters: { workspaceId: { id: "ws_ffl" } } },
+      "query",
+    );
+    expect(legacy.ok).toBe(false);
+  });
+
+  it("pins one allowlisted id and does not leave a second selector behind", () => {
+    const result = confineArguments(bound, { workspace_id: "ws_ffl", note: "keep" }, "none");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.args.workspaceId).toBe("ws_ffl");
+      expect(result.args).not.toHaveProperty("workspace_id");
+      expect(JSON.stringify(result.args)).not.toContain("workspaceIds");
+    }
+  });
+});
+
+describe("onboarding allowlist", () => {
+  it("denies manifest and synthetic tools for a scoped key, including a tools query and a wildcard scope", () => {
+    const ident = scoped({ scopes: ["*"] });
+    expect(onboardingAllows({ name: "connection_status", method: "GET", path: "mcp://connection-status" })).toBe(true);
+    for (const name of ["get_ffl_occupancy", "get_cfa_numbers", "owner_billing", "act_leasing_triage", "get_leasing_triage"]) {
+      expect(exposeTool(name, new Set([name]), ident, { enableWrites: true })).toBe(false);
+    }
+    expect(permitManifestTool(ident, { name: "list_contacts", method: "GET", path: "/api/v1/contacts", scope: "*" }, { enableWrites: true }).ok).toBe(false);
+    expect(permitManifestTool(ident, { name: "get_me", method: "GET", path: "/api/v1/me", scope: "*" }, { enableWrites: true }).ok).toBe(false);
+    const status = connectionStatusPayload(ident);
+    expect(status.dataRoutesCleared).toEqual([]);
+    expect(JSON.stringify(status)).not.toMatch(/\/api\/v1\/(?!me)/);
+    expect(JSON.stringify(status.allowlist)).not.toContain("/api/v1/");
+  });
+});
+
+describe("redaction", () => {
+  it("keeps a record UUID and redacts credential fields and secret prefixes", () => {
+    const id = "550e8400-e29b-41d4-a716-446655440000";
+    const body = redactStructured({
+      id,
+      note: "paid",
+      access_token: "ffl_live_SUPERSECRETVALUE",
+      nested: { crmKey: "ffl_test_abc-def-ghi-jkl" },
+    }) as { id: string; note: string; access_token: string; nested: { crmKey: string } };
+    expect(body.id).toBe(id);
+    expect(body.note).toBe("paid");
+    expect(body.access_token).toBe("[redacted]");
+    expect(body.nested.crmKey).toBe("[redacted]");
+    expect(JSON.stringify(body)).not.toContain("SUPERSECRETVALUE");
+    const text = redactSecrets(`ffl_test_abc-def-ghi-jkl ${id}`);
+    expect(text).toContain(id);
     expect(text).not.toContain("abc-def");
-    expect(text).not.toContain("eyJ");
-    expect(text).not.toContain("a1b2c3");
-    expect(text).toContain("[jwt redacted]");
-    expect(text).toContain("[token redacted]");
   });
 });

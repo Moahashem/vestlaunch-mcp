@@ -71,12 +71,12 @@ describe("identity", () => {
 describe("tool permission", () => {
   it("a read-only key sees its business reads and not writes, sends, or the other business", () => {
     const ffl = id({ scopes: read.scopes, businesses: ["ffl"], workspaceIds: ["ws_ffl"] });
-    expect(exposeTool("get_ffl_occupancy", null, ffl, { enableWrites: true })).toBe(true);
+    expect(exposeTool("get_ffl_occupancy", null, ffl, { enableWrites: true })).toBe(false);
     expect(exposeTool("get_cfa_numbers", null, ffl, { enableWrites: true })).toBe(false);
     expect(exposeTool("act_leasing_triage", null, ffl, { enableWrites: true })).toBe(false);
-    expect(exposeTool("owner_billing", null, ffl, { enableWrites: true })).toBe(true);
+    expect(exposeTool("owner_billing", null, ffl, { enableWrites: true })).toBe(false);
     expect(permitOwnerBillingAction(ffl, { action: "dont_charge" }, true).ok).toBe(false);
-    expect(permitOwnerBillingAction(ffl, { action: "list" }, true).ok).toBe(true);
+    expect(permitOwnerBillingAction(ffl, { action: "list" }, true).ok).toBe(false);
     expect(permitTool(ffl, "report_run_complete", { enableWrites: true }).ok).toBe(false);
   });
 
@@ -90,12 +90,12 @@ describe("tool permission", () => {
     const legacy = id({ authority: "legacy-shared", authorityOk: true, scopes: ["*"] });
     expect(permitTool(legacy, "act_leasing_triage", { enableWrites: false }).ok).toBe(true);
     const cran = id({ scopes: ["leasing:write"], businesses: ["cranbrook"], workspaceIds: ["ws_cran"] });
-    expect(permitTool(cran, "record_tour_outcome", { enableWrites: true }).ok).toBe(true);
+    expect(permitTool(cran, "record_tour_outcome", { enableWrites: true }).ok).toBe(false);
     expect(permitTool(id({ scopes: ["properties:read"], businesses: ["cranbrook"], workspaceIds: ["ws_cran"] }), "set_office_closure", { enableWrites: true }).ok).toBe(false);
-    expect(permitOwnerBillingAction(id({ scopes: ["*"], businesses: ["ffl"], workspaceIds: ["ws_ffl"] }), { action: "undo" }, false).ok).toBe(true);
+    expect(permitOwnerBillingAction(id({ scopes: ["*"], businesses: ["ffl"], workspaceIds: ["ws_ffl"] }), { action: "undo" }, false).ok).toBe(false);
     expect(permitTool(id({ scopes: ["*"] }), "act_leasing_triage", { enableWrites: true }).ok).toBe(false);
-    expect(permitTool(both, "get_ffl_occupancy", { enableWrites: true }).ok).toBe(true);
-    expect(permitTool(both, "get_cfa_numbers", { enableWrites: true }).ok).toBe(true);
+    expect(permitTool(both, "get_ffl_occupancy", { enableWrites: true }).ok).toBe(false);
+    expect(permitTool(both, "get_cfa_numbers", { enableWrites: true }).ok).toBe(false);
   });
 
   it("does not register a send or SQL tool as a read, and still registers an ordinary read", () => {
@@ -112,11 +112,18 @@ describe("tool permission", () => {
     ).toBe(false);
     expect(
       permitManifestTool(
-        id({ scopes: ["communications:write"], businesses: ["ffl"], workspaceIds: ["ws_ffl"] }),
+        id({ authority: "legacy-shared", authorityOk: true, scopes: ["communications:write"] }),
         { name: "send_sms", method: "POST", path: "/api/v1/communications", scope: "communications:write" },
         { enableWrites: true },
       ).ok,
     ).toBe(true);
+    expect(
+      permitManifestTool(
+        id({ scopes: ["communications:write"], businesses: ["ffl"], workspaceIds: ["ws_ffl"] }),
+        { name: "send_sms", method: "POST", path: "/api/v1/communications", scope: "communications:write" },
+        { enableWrites: true },
+      ).ok,
+    ).toBe(false);
   });
 
   it("a scoped key with no business sees neither family; legacy-shared still follows scopes", () => {

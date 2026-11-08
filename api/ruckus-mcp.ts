@@ -44,6 +44,7 @@
  *   VESTLAUNCH_TIMEOUT_MS — optional request timeout (default 30s)
  */
 
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -1037,6 +1038,45 @@ function baseUrl(): string {
   return "https://crm.vestlaunch.com";
 }
 
+/** Class of the bearer presented to ruckus_send. Never a secret, prefix, or hash. */
+export const RUCKUS_SEND_AUTH_CLASSES = ["configured_match", "other", "missing"] as const;
+export type RuckusSendAuthClass = (typeof RUCKUS_SEND_AUTH_CLASSES)[number];
+
+/** Compare the presented bearer with the configured token. Empty means missing. */
+export function classifyRuckusSendBearer(presented: string, configured: string | undefined): RuckusSendAuthClass {
+  const bearer = presented.trim();
+  if (!bearer) return "missing";
+  const env = (configured ?? "").trim();
+  if (env.length > 0 && bearer === env) return "configured_match";
+  return "other";
+}
+
+const OBS_CORRELATION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** One stdout line. Any field that is not a class, uuid, integer status, or boolean is dropped. */
+export function ruckusSendObservationLine(obs: {
+  authClass: string;
+  correlation: string;
+  firstStatus: number | null;
+  fallbackUsed: boolean;
+  finalStatus: number | null;
+}): string {
+  const authClass = (RUCKUS_SEND_AUTH_CLASSES as readonly string[]).includes(obs.authClass) ? obs.authClass : "other";
+  const correlation = OBS_CORRELATION.test(obs.correlation) ? obs.correlation : "none";
+  const status = (value: number | null) =>
+    typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599 ? String(value) : "none";
+  const fallbackUsed = obs.fallbackUsed === true ? "true" : "false";
+  return `ruckus_send_obs class=${authClass} correlation=${correlation} first_status=${status(obs.firstStatus)} fallback_used=${fallbackUsed} final_status=${status(obs.finalStatus)}\n`;
+}
+
+function logRuckusSendObservation(line: string): void {
+  try {
+    process.stdout.write(line);
+  } catch {
+    /* A log failure must not change the post, the retry, or the response. */
+  }
+}
+
 /** Pure: the token to retry a refused post with, or null (no retry). */
 export function sendFallbackToken(used: string, status: number, envToken: string | undefined): string | null {
   const env = (envToken ?? "").trim();
@@ -1045,14 +1085,25 @@ export function sendFallbackToken(used: string, status: number, envToken: string
   return env;
 }
 
-async function ruckusSend(args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
+export async function ruckusSend(args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
   const text = typeof args.text === "string" ? args.text.trim() : "";
   if (!text) throw new Error("ruckus_send requires a non-empty 'text'.");
 
   // Prefer the bearer the agent presented (the vault-injected CRM credential),
   // forwarded straight through; fall back to the RUCKUS_SEND_TOKEN env var.
-  const token = (forwardToken ?? "").trim() || (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  const presented = (forwardToken ?? "").trim();
+  const configured = process.env.RUCKUS_SEND_TOKEN;
+  const authClass = classifyRuckusSendBearer(presented, configured);
+  const correlation = randomUUID();
+  const token = presented || (configured ?? "").trim();
   if (!token) {
+    logRuckusSendObservation(ruckusSendObservationLine({
+      authClass,
+      correlation,
+      firstStatus: null,
+      fallbackUsed: false,
+      finalStatus: null,
+    }));
     throw new Error(
       "ruckus_send is not configured: set RUCKUS_SEND_TOKEN in this MCP's env " +
         "(= the ffl-crm CRON_SECRET that gates /api/ringcentral/ruckus-send).",
@@ -1068,6 +1119,21 @@ async function ruckusSend(args: Record<string, unknown>, forwardToken?: string):
   const timeoutMs = Number.isFinite(t) && t > 0 ? t : 30_000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let firstStatus: number | null = null;
+  let finalStatus: number | null = null;
+  let fallbackUsed = false;
+  let logged = false;
+  const observe = () => {
+    if (logged) return;
+    logged = true;
+    logRuckusSendObservation(ruckusSendObservationLine({
+      authClass,
+      correlation,
+      firstStatus,
+      fallbackUsed,
+      finalStatus,
+    }));
+  };
   try {
     const post = (bearer: string) =>
       fetch(`${baseUrl()}/api/ringcentral/ruckus-send`, {
@@ -1081,11 +1147,19 @@ async function ruckusSend(args: Record<string, unknown>, forwardToken?: string):
         signal: controller.signal,
       });
     let res = await post(token);
+    firstStatus = res.status;
+    finalStatus = res.status;
     // 2026-11-06: the CRM's CRON_SECRET was rotated and the vault credential kept the old one,
     // so every post was refused for five hours. If the presented bearer is refused and this
     // server holds a different token, try that one once before giving up.
     const fallback = sendFallbackToken(token, res.status, process.env.RUCKUS_SEND_TOKEN);
-    if (fallback) res = await post(fallback);
+    if (fallback) {
+      fallbackUsed = true;
+      finalStatus = null;
+      res = await post(fallback);
+      finalStatus = res.status;
+    }
+    observe();
     const out = await res.text();
     let json: unknown = null;
     try {
@@ -1096,6 +1170,7 @@ async function ruckusSend(args: Record<string, unknown>, forwardToken?: string):
     if (!res.ok) return { ok: false, status: res.status, error: json ?? out };
     return json ?? { ok: true };
   } catch (err) {
+    observe();
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {
     clearTimeout(timer);

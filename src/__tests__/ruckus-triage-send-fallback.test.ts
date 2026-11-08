@@ -5,13 +5,13 @@
  *    shared FFL key and the CRM refused it ("This API key belongs to another business"). The
  *    Cranbrook-keyed pair cranbrook_get_leasing_triage / cranbrook_act_leasing_triage is now
  *    always in Ruckus's tool list.
- * 2) The CRM's CRON_SECRET was rotated and the vault credential kept the old value: every
- *    ruckus_send was refused (401) for five hours. A refused post is retried once with this
- *    server's RUCKUS_SEND_TOKEN when that token is different.
+ * 2) A refused post is not retried with RUCKUS_SEND_TOKEN. The caller must present
+ *    that exact token. A previous vault secret that no longer matches cannot be
+ *    identified here, and an arbitrary bearer is not upgraded.
  */
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildCranbrookTools, withExtraTools, EXTRA_TOOLS, isCranbrookTool } from "../../api/_ruckus-cranbrook.js";
-import { sendFallbackToken } from "../../api/ruckus-mcp.js";
+import { ruckusSend, ruckusSenderAuthorized, sendFallbackToken } from "../../api/ruckus-mcp.js";
 
 describe("Cranbrook triage tools", () => {
   it("are added to an ordinary manifest", () => {
@@ -37,16 +37,63 @@ describe("Cranbrook triage tools", () => {
   });
 });
 
+const VAULT = "vault-token";
+const ADVERSARIAL = [
+  "ffl_live_MARKED",
+  "FFL_LIVE_MARKED",
+  "\u200bffl_live_MARKED",
+  "Bearer ffl_live_MARKED",
+  "Bearer Bearer ffl_live_MARKED",
+  "eyJhbGciOiJub25lIn0.eyJ0dCI6InJlZnJlc2gifQ.sig",
+  "old-cron-secret",
+  "not-a-credential",
+  "",
+  " vault-token",
+  "vault-token ",
+];
+
 describe("sendFallbackToken", () => {
-  it("retries a refused post with a different server token", () => {
-    expect(sendFallbackToken("old", 401, "new")).toBe("new");
-    expect(sendFallbackToken("old", 403, " new ")).toBe("new");
-  });
-  it("does not retry success, other errors, the same token or no token", () => {
+  it("never returns an upgrade token", () => {
+    for (const presented of ADVERSARIAL) {
+      expect(sendFallbackToken(presented, 401, VAULT)).toBeNull();
+      expect(sendFallbackToken(presented, 403, VAULT)).toBeNull();
+    }
+    expect(sendFallbackToken(VAULT, 401, VAULT)).toBeNull();
     expect(sendFallbackToken("old", 200, "new")).toBeNull();
     expect(sendFallbackToken("old", 500, "new")).toBeNull();
-    expect(sendFallbackToken("same", 401, "same")).toBeNull();
-    expect(sendFallbackToken("old", 401, "")).toBeNull();
-    expect(sendFallbackToken("old", 401, undefined)).toBeNull();
+  });
+});
+
+describe("ruckus_send confinement", () => {
+  afterEach(() => {
+    delete process.env.RUCKUS_SEND_TOKEN;
+    delete process.env.VESTLAUNCH_BASE_URL;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("posts once when the caller presents the vault token and does not retry a 401", async () => {
+    process.env.RUCKUS_SEND_TOKEN = VAULT;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, id: "m1" }), { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await ruckusSend({ text: "hello" }, VAULT);
+    expect(result).toMatchObject({ ok: false, status: 401 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({ Authorization: `Bearer ${VAULT}` });
+    expect(ruckusSenderAuthorized(VAULT, VAULT)).toBe(true);
+  });
+
+  it("does not upgrade adversarial or unmarked bearers to the vault token", async () => {
+    process.env.RUCKUS_SEND_TOKEN = VAULT;
+    const fetchMock = vi.fn(async () => {
+      throw new Error("fetch must not run");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    for (const presented of ADVERSARIAL) {
+      expect(ruckusSenderAuthorized(presented, VAULT)).toBe(false);
+      const result = await ruckusSend({ text: "hello" }, presented);
+      expect(result).toEqual({ ok: false, error: "Unauthorized." });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

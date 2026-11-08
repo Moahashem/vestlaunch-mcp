@@ -17,6 +17,7 @@ import { ApiClient } from "./api-client.js";
 import type { Config } from "./config.js";
 import { log } from "./log.js";
 import { loadManifest } from "./manifest.js";
+import { readMcpProfile } from "./mcp-profile.js";
 import {
   type McpToolDefinition,
   buildToolDefinition,
@@ -78,6 +79,13 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
   });
 
   const manifest = await loadManifest(client);
+  const profile = readMcpProfile(manifest.identity);
+  if (profile !== "absent") {
+    throw Object.assign(
+      new Error("This key is limited to the onboarding MCP and cannot register data tools."),
+      { code: "onboarding_profile" },
+    );
+  }
   log.info(`agent identity confirmed`, {
     apiKeyId: manifest.identity.apiKeyId,
     agentName: manifest.identity.agentName ?? manifest.identity.name,

@@ -19,6 +19,18 @@ afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 it("is off by default and never admits a non-canary", async () => { vi.stubEnv("COMPANY_NUMBERS_MIGRATION_APPLY_AGENTS", ""); await handler(req(), res); expect(status).toBe(404); vi.stubEnv("COMPANY_NUMBERS_MIGRATION_APPLY_AGENTS", "showmojo"); await handler(req(valid, "cfa"), res); expect(status).toBe(403); expect(fetchMock).not.toHaveBeenCalled(); });
 it("rejects caller-supplied patches and oversized input", async () => { await handler(req({ ...valid, patch: { system: "arbitrary" } }), res); expect(status).toBe(400); await handler(req({ text: "x".repeat(3000) }), res); expect(status).toBe(413); expect(fetchMock).not.toHaveBeenCalled(); });
 it("requires the selected wildcard admin identity", async () => { fetchMock.mockResolvedValueOnce(ok({ data: { identity: { apiKeyId: "other", scopes: ["*"] } } })); await handler(req(), res); expect(status).toBe(403); expect(fetchMock).toHaveBeenCalledTimes(1); });
+it("refuses a marked or non-object identity before any agent write", async () => {
+  fetchMock.mockResolvedValueOnce(ok({ data: { identity: { mcpProfile: "onboarding", apiKeyId: "admin", scopes: ["*"] } } }));
+  await handler(req(), res);
+  expect(status).toBe(403);
+  expect(payload.error).toContain("onboarding MCP");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  fetchMock.mockResolvedValueOnce(ok({ data: { identity: "Cranbrook Forest" } }));
+  await handler(req(), res);
+  expect(status).toBe(403);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls.every((call) => String(call[0]).includes("/api/v1/me"))).toBe(true);
+});
 it("refuses a live config changed since review", async () => { fetchMock.mockResolvedValueOnce(auth).mockResolvedValueOnce(ok({ ...before, version: 8 })); await handler(req(), res); expect(status).toBe(409); expect(fetchMock).toHaveBeenCalledTimes(2); });
 it("refuses a patch not reviewed by its hash", async () => { fetchMock.mockResolvedValueOnce(auth).mockResolvedValueOnce(ok(before)); await handler(req({ ...valid, reviewed_patch_fingerprint: "0".repeat(64) }), res); expect(status).toBe(409); expect(fetchMock).toHaveBeenCalledTimes(2); });
 it("applies only deterministic system/tools and verifies the active version", async () => { fetchMock.mockResolvedValueOnce(auth).mockResolvedValueOnce(ok(before)).mockResolvedValueOnce(ok({})).mockResolvedValueOnce(ok({ ...before, ...proposal.patch, version: 8 })); await handler(req(), res); expect(status).toBe(200); expect(payload).toMatchObject({ previous_version: 7, version: 8, verified: true }); const [url, init] = fetchMock.mock.calls[2]; expect(url).toBe(`https://api.anthropic.com/v1/agents/${before.id}`); expect(init.method).toBe("POST"); expect(JSON.parse(init.body)).toEqual(proposal.patch); expect(JSON.parse(init.body)).not.toHaveProperty("mcp_servers"); expect(JSON.stringify(payload)).not.toContain("secret"); });

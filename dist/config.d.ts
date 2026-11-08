@@ -10,6 +10,7 @@ export interface Config {
     baseUrl: string;
     apiKey: string;
     enableWrites: boolean;
+    blockAdmin: boolean;
     logLevel: LogLevel;
     timeoutMs: number;
 }

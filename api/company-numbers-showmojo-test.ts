@@ -2,6 +2,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { COMPANY_NUMBER_AGENTS, configFingerprint } from './company-numbers-agent-migration';
+import { readMcpProfile } from './_mcp-onboarding-policy';
 import { directSheetsAddendum } from './company-numbers-sheets-rollout';
 const titlePrefix = 'Supervised native Sheets ';
 const fleetPrompt = (date: string, key: string) => `Mo explicitly authorizes a full supervised refresh by ${key} on today's EXISTING Company Numbers tab (${date}, America/Chicago), overriding the two-morning rollout wait. This test must perform fresh source reads and native Sheets writes even if today's status already says done; ignore completed flags only for this supervised run. Attempt EVERY source/item in your normal scope, preserving all source definitions, gates, formulas, optional/null rules, exact labels, and owned cell boundaries in your system prompt. Before starting mark each required source flag not-done in YOUR OWN status cell so a failed refresh cannot retain an old done flag. Read your owned cells first, use each required source tool once, write healthy outputs, apply D16 empty-string clear-on-error ONLY to failed owned outputs and write YOUR existing alerts. Do not preserve stale data on any failed source. Read back every written range and compare with source. Preserve normal snapshots and only report_run_complete when all required scope is freshly verified. No Zapier calls in this test. Never write another agent's ledger, manual cells or unrelated cells. ${key === 'sales-lead-count' ? 'Sales: first verify today already exists with sheets_read. Call sheets_create_day_tab for today to exercise its idempotent existing-tab behavior; it must NOT duplicate or clear an existing tab. Complete ALL leads, calls, signups, huddle items and normal housekeeping. Never write row 28.' : 'Writer-only: never create, duplicate, rename, clear or delete any tab.'} Report source diagnostics/as_of, cells written, read-back comparison and any failures. This is a manual test, not a scheduled morning.\n\n${directSheetsAddendum(key)}`;
@@ -22,6 +23,7 @@ export default async function handler(req: IncomingMessage,res: ServerResponse) 
  const a=await fetch(`${base}/api/v1/me`,{headers:{Authorization:token},signal:AbortSignal.timeout(15000)});
  if(!a.ok)return json(res,401,{error:'CRM authentication failed'});
  const me=await a.json() as any;
+ if(readMcpProfile(me.data?.identity)!=='absent')return json(res,403,{error:'This key is limited to the onboarding MCP.'});
  if(me.data?.identity?.apiKeyId!==selected||!me.data?.identity?.scopes?.includes('*'))return json(res,403,{error:'Selected admin required'});
  const headers={'x-api-key':secret,'anthropic-version':'2023-06-01','anthropic-beta':'managed-agents-2026-04-01','content-type':'application/json'};
  const sign=(id:string)=>createHmac('sha256',secret).update(`showmojo-test:${id}:${selected}${key === 'showmojo' ? '' : ':'+key}`).digest('hex');

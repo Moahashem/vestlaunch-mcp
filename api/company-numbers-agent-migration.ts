@@ -6,6 +6,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash } from "node:crypto";
+import { readMcpProfile } from "./_mcp-onboarding-policy";
 
 export const COMPANY_NUMBER_AGENTS: Record<string, string> = {
   "sales-lead-count": "agent_01UQzJ4ZKLP7JGYsBvwptu74",
@@ -37,6 +38,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (!auth.ok) return json(res, 401, { error: "CRM authentication failed" });
     const me = await auth.json() as { data?: { identity?: { apiKeyId?: string; scopes?: string[] } } };
     const identity = me.data?.identity;
+    if (readMcpProfile(identity) !== "absent") return json(res, 403, { error: "This key is limited to the onboarding MCP." });
     if (identity?.apiKeyId !== selectedKeyId || !identity.scopes?.includes("*")) return json(res, 403, { error: "Selected migration admin key required" });
     const response = await fetch(`https://api.anthropic.com/v1/agents/${COMPANY_NUMBER_AGENTS[key]}`, {
       headers: { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-beta": "managed-agents-2026-04-01" },

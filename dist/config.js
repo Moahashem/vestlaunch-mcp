@@ -44,6 +44,7 @@ export function loadConfig() {
         baseUrl,
         apiKey,
         enableWrites: parseBool(process.env.VESTLAUNCH_ENABLE_WRITES, false),
+        blockAdmin: parseBool(process.env.VESTLAUNCH_BLOCK_ADMIN, false),
         logLevel: parseLogLevel(process.env.VESTLAUNCH_LOG_LEVEL),
         timeoutMs: parseTimeout(process.env.VESTLAUNCH_TIMEOUT_MS),
     };

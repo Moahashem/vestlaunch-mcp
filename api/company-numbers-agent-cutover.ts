@@ -7,6 +7,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { COMPANY_NUMBER_AGENTS, configFingerprint } from "./company-numbers-agent-migration";
+import { readMcpProfile } from "./_mcp-onboarding-policy";
 import { prepareMigration } from "../scripts/prepare-company-numbers-migration.mjs";
 export const CFA_OLD_COUNT_GATE = "D15_balances_over_500 between 0 and 100.";
 export const CFA_COUNT_GATE = "D15_balances_over_500 is an ACCOUNT COUNT, not a percentage: require a non-negative safe integer no greater than delinquency.components.aging_accounts, which must also be a non-negative safe integer. Preserve the tool's existing account scope (including former residents/HAP); do not cap this count at 100 or at total doors. Null remains unavailable and must be skipped; missing/invalid aging_accounts fails the D15 gate and alerts.";
@@ -51,6 +52,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const auth = await fetch(`${base}/api/v1/me`, { headers: { Authorization: token }, signal: AbortSignal.timeout(15000), cache: "no-store" });
     if (!auth.ok) return json(res, 401, { error: "CRM authentication failed" });
     const me = await auth.json() as { data?: { identity?: { apiKeyId?: string; scopes?: string[] } } };
+    if (readMcpProfile(me.data?.identity) !== "absent") return json(res, 403, { error: "This key is limited to the onboarding MCP." });
     if (me.data?.identity?.apiKeyId !== selected || !me.data.identity.scopes?.includes("*")) return json(res, 403, { error: "Selected migration admin key required" });
     const url = `https://api.anthropic.com/v1/agents/${COMPANY_NUMBER_AGENTS[key]}`;
     const headers = { "x-api-key": secret, "anthropic-version": "2023-06-01", "anthropic-beta": "managed-agents-2026-04-01", "content-type": "application/json" };

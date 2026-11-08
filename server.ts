@@ -9,6 +9,7 @@ import sheetsMcpHandler, { SHEETS_TOOL_NAMES, SHEETS_BACKEND_ROUTES } from "./ap
  * NOT use the /api zero-config functions convention). So this file is the one
  * server Vercel runs; it routes requests to the same handlers used elsewhere:
  *   - POST/GET /api/mcp                      → the VestLaunch read MCP (Bearer-protected)
+ *   - POST/GET /api/mcp-onboarding           → new bots whose CRM key is marked onboarding
  *   - POST/GET /api/ruckus-mcp               → Ruckus's reply MCP (ruckus_send; Bearer-protected)
  *   - POST/GET /api/agent-os-mcp             → AI OS heartbeat MCP (read/write; Bearer-protected)
  *   - GET/POST /api/cron/daily-lead-count    → the daily Sales lead-count trigger
@@ -41,6 +42,7 @@ import sheetsMcpHandler, { SHEETS_TOOL_NAMES, SHEETS_BACKEND_ROUTES } from "./ap
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import mcpHandler from "./api/mcp";
+import mcpOnboardingHandler from "./api/mcp-onboarding";
 import ruckusMcpHandler from "./api/ruckus-mcp";
 import ruckusExecuteHandler from "./api/ruckus-execute";
 import agentOsMcpHandler from "./api/agent-os-mcp";
@@ -92,6 +94,10 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (path === "/api/mcp") {
       await mcpHandler(req as IncomingMessage & { body?: unknown }, res);
+      return;
+    }
+    if (path === "/api/mcp-onboarding") {
+      await mcpOnboardingHandler(req as IncomingMessage & { body?: unknown }, res);
       return;
     }
     if (path === "/api/ruckus-mcp") {
@@ -213,6 +219,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
             "/api/company-numbers-supervised-test",
             "/api/sheets-mcp",
             "/api/mcp",
+            "/api/mcp-onboarding",
             "/api/ruckus-mcp",
             "/api/ruckus-execute",
             "/api/agent-os-mcp",

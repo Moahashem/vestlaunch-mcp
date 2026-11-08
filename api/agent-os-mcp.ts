@@ -5,6 +5,7 @@
  * (and Ruckus, the Chief of Staff) can use it:
  *   - agent_heartbeat        → an agent reports what it just did (write)
  *   - agent_heartbeats_list  → read recent heartbeats (for the brief / dashboard)
+ *   - dispatch_agent         → kick off a specific agent on demand (Ruckus -> agent)
  *
  * Both RELAY to ffl-crm:
  *   POST /api/agent-os/heartbeat   and   GET /api/agent-os/heartbeats
@@ -66,6 +67,26 @@ const LIST_SCHEMA = {
     limit: { type: "number", description: "Max rows (default 100, max 500)." },
     agentKey: { type: "string", description: "Optional: only this agent's heartbeats." },
   },
+  additionalProperties: false,
+};
+
+const DISPATCH_TOOL = "dispatch_agent";
+const DISPATCH_DESC =
+  "Kick off a specific FFL agent ON DEMAND (instead of waiting for its morning " +
+  "cron). Use when Mo asks you to run an agent now, or you need fresh numbers " +
+  "before answering. Args: { agentKey } (required) — one of: 'occupancy', " +
+  "'sales-lead-count', 'showmojo', 'cranbrook-cfa'. Returns the trigger result; " +
+  "the agent then runs on the cloud and reports back via its own heartbeat.";
+const DISPATCH_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    agentKey: {
+      type: "string",
+      description:
+        "Which agent to run now: 'occupancy' | 'sales-lead-count' | 'showmojo' | 'cranbrook-cfa'.",
+    },
+  },
+  required: ["agentKey"],
   additionalProperties: false,
 };
 
@@ -150,6 +171,12 @@ async function listHeartbeats(args: Record<string, unknown>, token: string): Pro
   return callCrm("GET", `/api/agent-os/heartbeats${qs ? `?${qs}` : ""}`, token);
 }
 
+async function dispatchAgent(args: Record<string, unknown>, token: string): Promise<unknown> {
+  const agentKey = typeof args.agentKey === "string" ? args.agentKey.trim() : "";
+  if (!agentKey) throw new Error("dispatch_agent requires a non-empty 'agentKey'.");
+  return callCrm("POST", "/api/agent-os/dispatch", token, { agentKey });
+}
+
 function buildServer(forwardToken?: string): Server {
   const server = new Server(
     { name: "agent-os-mcp", version: "0.1.0" },
@@ -160,6 +187,7 @@ function buildServer(forwardToken?: string): Server {
     tools: [
       { name: WRITE_TOOL, description: WRITE_DESC, inputSchema: WRITE_SCHEMA },
       { name: LIST_TOOL, description: LIST_DESC, inputSchema: LIST_SCHEMA },
+      { name: DISPATCH_TOOL, description: DISPATCH_DESC, inputSchema: DISPATCH_SCHEMA },
     ],
   }));
 
@@ -171,6 +199,7 @@ function buildServer(forwardToken?: string): Server {
       let result: unknown;
       if (name === WRITE_TOOL) result = await writeHeartbeat(args, token);
       else if (name === LIST_TOOL) result = await listHeartbeats(args, token);
+      else if (name === DISPATCH_TOOL) result = await dispatchAgent(args, token);
       else return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {

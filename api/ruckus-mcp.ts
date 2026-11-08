@@ -31,14 +31,13 @@
  * and is injected server-side here — the model just calls `ruckus_send({text})`
  * and never sees the secret.
  *
- * Auth model: this server is a THIN AUTHENTICATED RELAY. It requires the agent to
- * present some bearer (the vault injects one) and forwards that exact bearer to
- * ruckus-send, whose CRON_SECRET check is the real gate. So the vault credential's
- * token must equal the CRM CRON_SECRET; there is no second token to keep in sync.
+ * Auth model: privileged tools require the presented bearer to equal
+ * RUCKUS_SEND_TOKEN. That token is not substituted for a different bearer, and
+ * a refused post is not retried. The vault credential has to be that same value.
+ * A previous cron secret that no longer matches cannot be recognized from here.
  *
  * Env (set by Mo in Vercel — never hard-coded):
- *   RUCKUS_SEND_TOKEN    — fallback bearer for the CRM send endpoint (= CRON_SECRET)
- *                          if the agent's forwarded bearer is somehow absent.
+ *   RUCKUS_SEND_TOKEN    — exact bearer the caller must present (= CRON_SECRET).
  *   RUCKUS_SEND_BASE_URL — optional CRM base; defaults to VESTLAUNCH_BASE_URL,
  *                          then https://crm.vestlaunch.com
  *   VESTLAUNCH_TIMEOUT_MS — optional request timeout (default 30s)
@@ -56,10 +55,6 @@ import {
 import { isCranbrookTool, loadCranbrookTools, runCranbrookTool, type CranbrookTool } from "./_ruckus-cranbrook";
 import { ASSISTANT_TOOLS, isAssistantTool, runAssistantTool } from "./_ruckus-assistant";
 import { ORDER_TOOLS, isOrderTool, runOrderTool } from "./_ruckus-orders";
-import { readAccessToken } from "./_oauth";
-import { readMcpProfile } from "./_mcp-onboarding-policy";
-
-const CRM_KEY_PREFIX = "ffl_live_";
 
 // 120s: a mailbox cleanup (unsubscribe + trash up to 500 messages) can take a minute.
 export const config = { maxDuration: 300 };
@@ -1042,60 +1037,33 @@ function baseUrl(): string {
 }
 
 /**
- * Pure: the token to retry a refused post with, or null (no retry).
- * A CRM key is never upgraded to RUCKUS_SEND_TOKEN. The retry remains for a
- * previous vault cron secret, which does not use the ffl_live_ prefix.
+ * There is no privileged retry. A refused post is not repeated with
+ * RUCKUS_SEND_TOKEN. The only authorized sender is a caller that already
+ * presented that exact token.
  */
-export function sendFallbackToken(used: string, status: number, envToken: string | undefined): string | null {
+export function sendFallbackToken(
+  _used: string,
+  _status: number,
+  _envToken: string | undefined,
+): null {
+  return null;
+}
+
+/** Exact match with the configured vault token. No normalization, no prefix check. */
+export function ruckusSenderAuthorized(presented: string, envToken: string | undefined): boolean {
   const env = (envToken ?? "").trim();
-  const presented = used.trim();
-  if (status !== 401 && status !== 403) return null;
-  if (!env || env === presented) return null;
-  if (presented.startsWith(CRM_KEY_PREFIX)) return null;
-  return env;
-}
-
-async function presentedCrmKey(presented: string): Promise<string | null> {
-  if (presented.startsWith(CRM_KEY_PREFIX)) return presented;
-  if (!presented) return null;
-  try {
-    const key = (await readAccessToken(presented)).crmKey;
-    return key.startsWith(CRM_KEY_PREFIX) ? key : null;
-  } catch {
-    return null;
-  }
-}
-
-/** A CRM key may be forwarded as itself only when its identity object omits mcpProfile. */
-async function crmKeyBlockedFromRuckus(crmKey: string): Promise<boolean> {
-  const base = (process.env.VESTLAUNCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (!base) return true;
-  try {
-    const response = await fetch(`${base}/api/v1/me`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${crmKey}`, Accept: "application/json" },
-    });
-    if (!response.ok) return true;
-    const body = (await response.json()) as { data?: { identity?: unknown } };
-    return readMcpProfile(body.data?.identity) !== "absent";
-  } catch {
-    return true;
-  }
+  return env.length > 0 && presented === env;
 }
 
 export async function ruckusSend(args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
   const text = typeof args.text === "string" ? args.text.trim() : "";
   if (!text) throw new Error("ruckus_send requires a non-empty 'text'.");
 
-  // Prefer the bearer the agent presented (the vault-injected cron credential),
-  // forwarded straight through. A CRM key is never retried with the vault token.
-  const presented = (forwardToken ?? "").trim();
-  const token = presented || (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
-  if (!token) {
-    throw new Error(
-      "ruckus_send is not configured: set RUCKUS_SEND_TOKEN in this MCP's env " +
-        "(= the ffl-crm CRON_SECRET that gates /api/ringcentral/ruckus-send).",
-    );
+  // The presented bearer must already be the vault token. Anything else,
+  // including a CRM key or a previous cron secret, is not replaced with it.
+  const presented = forwardToken ?? "";
+  if (!ruckusSenderAuthorized(presented, process.env.RUCKUS_SEND_TOKEN)) {
+    return { ok: false, error: "Unauthorized." };
   }
 
   const body: Record<string, unknown> = { text };
@@ -1119,28 +1087,7 @@ export async function ruckusSend(args: Record<string, unknown>, forwardToken?: s
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-    const crmKey = presented ? await presentedCrmKey(presented) : null;
-    if (crmKey) {
-      if (await crmKeyBlockedFromRuckus(crmKey)) {
-        return { ok: false, error: "This key cannot use Ruckus." };
-      }
-      const own = await post(crmKey);
-      const ownText = await own.text();
-      let ownJson: unknown = null;
-      try {
-        ownJson = ownText ? JSON.parse(ownText) : null;
-      } catch {
-        ownJson = { raw: ownText };
-      }
-      if (!own.ok) return { ok: false, status: own.status, error: ownJson ?? ownText };
-      return ownJson ?? { ok: true };
-    }
-    let res = await post(token);
-    // 2026-11-06: the CRM's CRON_SECRET was rotated and the vault credential kept the old one,
-    // so every post was refused for five hours. A refused non-CRM bearer may be retried once
-    // with RUCKUS_SEND_TOKEN. CRM keys take the branch above and never reach this retry.
-    const fallback = sendFallbackToken(token, res.status, process.env.RUCKUS_SEND_TOKEN);
-    if (fallback) res = await post(fallback);
+    const res = await post(presented);
     const out = await res.text();
     let json: unknown = null;
     try {
@@ -1273,13 +1220,10 @@ export default async function handler(
   req: IncomingMessage & { body?: unknown },
   res: ServerResponse,
 ): Promise<void> {
-  // THIN AUTHENTICATED RELAY (deliberate): this server requires only that the
-  // connecting agent presents SOME bearer (the vault injects one), then forwards
-  // that exact bearer to ffl-crm /api/ringcentral/ruckus-send. The real gate is
-  // downstream — ruckus-send rejects anything whose bearer != the CRM CRON_SECRET.
-  // So the ONLY value that must be correct is the vault credential's token (= the
-  // CRM CRON_SECRET); there is no second token to keep in sync here. A caller with
-  // a wrong/absent bearer simply gets a 401 from ruckus-send and nothing is posted.
+  // Tool calls that post or rerun require the presented bearer to equal
+  // RUCKUS_SEND_TOKEN. A different bearer is not forwarded and is not replaced
+  // with that token. Listing tools still requires some bearer so an empty
+  // request is rejected here.
   const incomingBearer = (req.headers["authorization"] ?? "").toString().replace(/^Bearer\s+/i, "").trim();
   if (!incomingBearer) {
     sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });

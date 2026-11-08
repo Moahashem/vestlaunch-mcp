@@ -117,7 +117,8 @@ describe("legacy /api/mcp profile gate", () => {
   it("leaves an unmarked key, including a display name, on the existing surface", () => {
     expect(legacySurfaceDecision({ scopes: ["*"], name: "Cranbrook Forest" }).ok).toBe(true);
     expect(legacySurfaceDecision({ scopes: ["properties:read"], business: "ffl", workspaceIds: ["ws_ffl"] }).ok).toBe(true);
-    expect(legacySurfaceDecision(undefined).ok).toBe(true);
+    expect(legacySurfaceDecision(undefined).ok).toBe(false);
+    expect(legacySurfaceDecision(null).ok).toBe(false);
   });
 
   it("refuses a server-marked onboarding key and a malformed profile", () => {
@@ -355,6 +356,23 @@ describe("onboarding route", () => {
       .map((call) => (call[1] as RequestInit).headers as Record<string, string>);
     expect(authorizations.every((headers) => headers.Authorization === `Bearer ${KEY}`)).toBe(true);
     expect(JSON.stringify(authorizations)).not.toContain("PRIVILEGEDVALUE");
+  });
+
+  it("does not grant tools when identity is null or missing", async () => {
+    process.env.VESTLAUNCH_BASE_URL = "https://crm.example.invalid";
+    process.env.VESTLAUNCH_API_KEY = ENV_KEY;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      data: { identity: null, capabilities: [{ name: "list_contacts", method: "GET", path: "/api/v1/contacts", scope: "contacts:read", description: "List." }] },
+    }), { status: 200 })));
+    const missing = resCapture();
+    await mcp(req(`Bearer ${KEY}`), missing as unknown as ServerResponse);
+    expect(missing.statusCode).toBe(403);
+    expect(missing.body).toContain("malformed");
+    expect(missing.body).not.toContain("list_contacts");
+    const onboard = resCapture();
+    await onboarding(req(`Bearer ${KEY}`), onboard as unknown as ServerResponse);
+    expect(onboard.statusCode).toBe(403);
+    expect(onboard.body).toContain("malformed");
   });
 
   it("treats a string or array identity as malformed on both HTTP routes", async () => {

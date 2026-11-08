@@ -27,9 +27,8 @@ function plainIdentity(identity: unknown): identity is Record<string, unknown> {
 }
 
 export function readMcpProfile(identity: unknown): ProfileRead {
-  // Missing identity stays on the existing surface. A string, array, or other
-  // non-object is not a successful identity and must not be treated as unmarked.
-  if (identity == null) return "absent";
+  // A missing or non-object identity is not a successful legacy identity.
+  // Only a JSON object that omits mcpProfile stays on the existing surface.
   if (!plainIdentity(identity)) return "malformed";
   if (!Object.prototype.hasOwnProperty.call(identity, "mcpProfile")) return "absent";
   const value = identity.mcpProfile;
@@ -47,6 +46,7 @@ export function legacySurfaceDecision(identity: unknown): { ok: true } | { ok: f
       reason: "This key is limited to the onboarding MCP and cannot use /api/mcp.",
     };
   }
+  if (profile === "malformed") return { ok: false, reason: "CRM identity is malformed." };
   return { ok: false, reason: "mcpProfile is not a recognized server-issued value." };
 }
 
@@ -59,6 +59,9 @@ export interface OnboardingClaims {
 export function readOnboardingClaims(
   identity: unknown,
 ): { ok: true; claims: OnboardingClaims } | { ok: false; reason: string } {
+  if (readMcpProfile(identity) === "malformed") {
+    return { ok: false, reason: "CRM identity is malformed." };
+  }
   if (readMcpProfile(identity) !== "onboarding") {
     return { ok: false, reason: "This key is not marked mcpProfile=onboarding." };
   }

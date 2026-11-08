@@ -53,7 +53,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-`npx vestlaunch-mcp` reads `GET /api/v1/me` for `VESTLAUNCH_API_KEY` and exits without registering tools when that identity is marked `mcpProfile: "onboarding"` or is not a JSON object. That key belongs on `/api/mcp-onboarding`. Putting it in this env block does not restore the manifest.
+`npx vestlaunch-mcp` runs the committed `dist/index.js` bin. It reads `GET /api/v1/me` for `VESTLAUNCH_API_KEY` and exits without registering tools when that identity is marked `mcpProfile: "onboarding"`, is missing, is null, or is not a JSON object. That key belongs on `/api/mcp-onboarding`. Putting it in this env block does not restore the manifest.
 
 #### Claude Code
 

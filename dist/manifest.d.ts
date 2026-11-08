@@ -16,6 +16,19 @@ export interface ManifestTool {
     path: string;
     scope: string;
     description: string;
+    /**
+     * Optional JSON Schema describing the tool's flat input arguments
+     * (path params, query/body fields). Published by the CRM manifest so
+     * the connector can register fully-typed tools instead of a generic
+     * body/query blob. When absent, the connector falls back to the
+     * generic path/query/body shape.
+     */
+    inputSchema?: {
+        type?: string;
+        properties?: Record<string, unknown>;
+        required?: string[];
+        additionalProperties?: boolean;
+    };
 }
 export interface AgentIdentity {
     apiKeyId: string;
@@ -40,6 +53,16 @@ export interface MeResponse {
     };
     capabilities: ManifestTool[];
 }
+/**
+ * Event-type management tools.
+ *
+ * Published locally until the deployed CRM manifest (GET /api/v1/me →
+ * capabilities[]) includes them natively (ffl-crm PR: /api/v1/event-types).
+ * Entries mirror the CRM TOOL_MANIFEST shape exactly. If the CRM starts
+ * publishing a tool with the same name, the server copy wins and the
+ * local one is dropped — the CRM stays the source of truth.
+ */
+export declare const SUPPLEMENTAL_TOOLS: ManifestTool[];
 export declare function loadManifest(client: ApiClient): Promise<MeResponse>;
 export declare function extractPathParams(path: string): string[];
 export declare function substitutePath(path: string, params: Record<string, string>): string;

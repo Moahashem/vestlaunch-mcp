@@ -13,7 +13,6 @@ function plainIdentity(identity: unknown): identity is Record<string, unknown> {
 }
 
 export function readMcpProfile(identity: unknown): ProfileRead {
-  if (identity == null) return "absent";
   if (!plainIdentity(identity)) return "malformed";
   if (!Object.prototype.hasOwnProperty.call(identity, "mcpProfile")) return "absent";
   const value = identity.mcpProfile;

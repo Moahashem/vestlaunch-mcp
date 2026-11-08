@@ -33,10 +33,9 @@ The marker is read only from `data.identity`. A marker anywhere else leaves
 - `mcpProfile` is exactly `onboarding`. Any other value, including an array or
   a near-synonym, is rejected on both routes. A missing field on a JSON object
   means the key stays on `/api/mcp` and is refused by `/api/mcp-onboarding`.
-  `identity` itself must be that object. A string, array, number, or boolean
-  is malformed and is refused everywhere this server can see it. `null` and a
-  missing identity stay on the existing surface, because current successful
-  responses use an object.
+  `identity` itself must be that object. `null`, a missing identity, a string,
+  an array, a number, or a boolean is malformed. It does not register data
+  tools and it does not pass onboarding.
 - `business` is exactly `ffl`, `cranbrook`, or `both`. A display name such as
   `Cranbrook Forest` is not a grant. An optional `businesses` array must agree
   (`["ffl"]`, `["cranbrook"]`, or `["ffl","cranbrook"]`).
@@ -66,22 +65,27 @@ inspection, cutover, and supervised-test routes also refuse a key once
 `mcpProfile` is present or the identity is not an object. A key that omits
 the field keeps those routes' existing admin-key checks.
 
-`ruckus_send` forwards a CRM key as itself and does not retry it with
-`RUCKUS_SEND_TOKEN`. A marked or malformed identity is refused before the
-post. A previous vault cron secret, which is not an `ffl_live_` key, can
-still be retried once. That recovery is what kept sends working on
-2026-11-06 after `CRON_SECRET` was rotated ahead of the vault. Removing it
-would refuse those live Ruckus posts until the vault bearer equals
-`RUCKUS_SEND_TOKEN`. This change does not read that env value. Recruiting
-and agent-os do not gain this retry. Their files are unchanged.
+`ruckus_send` posts only when the presented bearer is exactly
+`RUCKUS_SEND_TOKEN`. A refused post is not retried. Case changes, a leading
+invisible character, a second `Bearer` scheme, a refresh token, a CRM key,
+and any other string are not replaced with the vault token. The 2026-11-06
+recovery accepted a previous cron secret that no longer matched. That caller
+cannot be identified with the auth this server already has. No new secret or
+identity bridge is added. Those posts stay refused until the vault bearer is
+the current token, and this release stays held. Recruiting and agent-os
+files are unchanged.
+
+The CRM does not yet store `mcpProfile` or the reserved scope
+`mcp:onboarding`. Do not issue a new bot key until that contract is live.
+This repository does not mint keys.
 
 ## Shared bearer and OAuth discovery
 
 `/api/mcp` matches `MCP_BEARER_TOKEN` before the `ffl_live_` prefix. When
 those two values are the same string, the request uses `VESTLAUNCH_API_KEY`
-and the profile gate sees that key's identity. Do not set the shared bearer
-to a key that should stay confined. The match order is unchanged because the
-live shared token's shape is not read here.
+and the profile gate sees that key's identity. Confirm they are different
+before any release of this gate. That check is an operational prerequisite.
+This change does not read either value and does not alter the match order.
 
 OAuth discovery still advertises `authorization_code` and `refresh_token`.
 Changing that document would break clients that already connect. A token

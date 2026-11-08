@@ -52,6 +52,9 @@ describe("stdio profile gate", () => {
       { mcpProfile: ["onboarding"] },
     ];
     for (const sample of samples) expect(stdioProfile(sample)).toBe(httpProfile(sample));
+    expect(httpProfile(null)).toBe("malformed");
+    expect(httpProfile(undefined)).toBe("malformed");
+    expect(httpProfile({ scopes: ["contacts:read"] })).toBe("absent");
   });
 
   it("registers a manifest tool for an object identity that omits the marker", async () => {
@@ -71,6 +74,12 @@ describe("stdio profile gate", () => {
     vi.stubGlobal("fetch", vi.fn(async () => me("Cranbrook Forest")));
     await expect(buildServer(config)).rejects.toThrow("onboarding MCP");
     vi.stubGlobal("fetch", vi.fn(async () => me(["ffl"])));
+    await expect(buildServer(config)).rejects.toThrow("onboarding MCP");
+    vi.stubGlobal("fetch", vi.fn(async () => me(null)));
+    await expect(buildServer(config)).rejects.toThrow("onboarding MCP");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      data: { capabilities: [{ name: "list_contacts", method: "GET", path: "/api/v1/contacts", scope: "contacts:read", description: "List." }] },
+    }), { status: 200 })));
     await expect(buildServer(config)).rejects.toThrow("onboarding MCP");
   });
 });

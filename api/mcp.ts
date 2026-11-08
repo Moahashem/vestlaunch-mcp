@@ -95,6 +95,30 @@ export const config = { maxDuration: 60 };
 /** CRM API keys minted in Settings -> API Keys always start with this. */
 const CRM_KEY_PREFIX = "ffl_live_";
 
+/** Class of the credential presented to /api/mcp. Never a secret, prefix, or hash. */
+export const MCP_CREDENTIAL_CLASSES = ["shared_bearer", "crm_key", "oauth", "rejected"] as const;
+export type McpCredentialClass = (typeof MCP_CREDENTIAL_CLASSES)[number];
+
+export function classifyPresentedCredential(input: {
+  bearer: string;
+  legacyToken: string;
+  crmKeyPrefix: string;
+  oauthUnwrapped: boolean;
+}): McpCredentialClass {
+  if (input.legacyToken && input.bearer === input.legacyToken) return "shared_bearer";
+  if (input.bearer.startsWith(input.crmKeyPrefix)) return "crm_key";
+  if (input.oauthUnwrapped) return "oauth";
+  return "rejected";
+}
+
+export function mcpCredentialClassLine(kind: McpCredentialClass): string {
+  return `mcp_credential_class=${kind}\n`;
+}
+
+function logMcpCredentialClass(kind: McpCredentialClass): void {
+  process.stdout.write(mcpCredentialClassLine(kind));
+}
+
 // ───────────────────────── config ─────────────────────────
 type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE" | "PUT";
 
@@ -2600,6 +2624,7 @@ export default async function handler(
   const legacyToken = (process.env.MCP_BEARER_TOKEN ?? "").trim();
 
   let perUserApiKey: string | undefined;
+  let oauthUnwrapped = false;
   if (legacyToken && bearer === legacyToken) {
     perUserApiKey = undefined; // legacy shared-token mode (env VESTLAUNCH_API_KEY)
   } else if (bearer.startsWith(CRM_KEY_PREFIX)) {
@@ -2616,6 +2641,7 @@ export default async function handler(
     }
     if (ownKey) {
       perUserApiKey = ownKey;
+      oauthUnwrapped = true;
     } else if (authkitDomain()) {
       // Legacy fallback: a WorkOS access token from the old sign-in flow.
       // Verify -> map identity to a CRM key. Only active if WorkOS is configured.
@@ -2623,12 +2649,14 @@ export default async function handler(
       try {
         identity = await verifyWorkosToken(bearer);
       } catch {
+        logMcpCredentialClass("rejected");
         sendUnauthorized(res, "Invalid or expired sign-in token");
         return;
       }
       const mapped = crmKeyForIdentity(identity);
       if (!mapped) {
         // Authenticated, but no CRM access provisioned for this person.
+        logMcpCredentialClass("rejected");
         sendJson(res, 403, {
           jsonrpc: "2.0",
           error: {
@@ -2641,16 +2669,28 @@ export default async function handler(
         return;
       }
       perUserApiKey = mapped;
+      oauthUnwrapped = true;
     } else {
       // Token isn't one of ours and WorkOS isn't configured — reject.
+      logMcpCredentialClass("rejected");
       sendUnauthorized(res, "Invalid or expired sign-in token");
       return;
     }
   } else {
     // No usable credential — challenge the client to start the sign-in flow.
+    logMcpCredentialClass("rejected");
     sendUnauthorized(res);
     return;
   }
+
+  logMcpCredentialClass(
+    classifyPresentedCredential({
+      bearer,
+      legacyToken,
+      crmKeyPrefix: CRM_KEY_PREFIX,
+      oauthUnwrapped,
+    }),
+  );
 
   const toolFilter = parseToolFilter(req.url);
 

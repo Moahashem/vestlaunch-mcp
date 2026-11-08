@@ -9,9 +9,9 @@
  *    ruckus_send was refused (401) for five hours. A refused post is retried once with this
  *    server's RUCKUS_SEND_TOKEN when that token is different.
  */
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildCranbrookTools, withExtraTools, EXTRA_TOOLS, isCranbrookTool } from "../../api/_ruckus-cranbrook.js";
-import { sendFallbackToken } from "../../api/ruckus-mcp.js";
+import { ruckusSend, sendFallbackToken } from "../../api/ruckus-mcp.js";
 
 describe("Cranbrook triage tools", () => {
   it("are added to an ordinary manifest", () => {
@@ -42,11 +42,74 @@ describe("sendFallbackToken", () => {
     expect(sendFallbackToken("old", 401, "new")).toBe("new");
     expect(sendFallbackToken("old", 403, " new ")).toBe("new");
   });
-  it("does not retry success, other errors, the same token or no token", () => {
+  it("does not retry success, other errors, the same token, no token, or a CRM key", () => {
     expect(sendFallbackToken("old", 200, "new")).toBeNull();
     expect(sendFallbackToken("old", 500, "new")).toBeNull();
     expect(sendFallbackToken("same", 401, "same")).toBeNull();
     expect(sendFallbackToken("old", 401, "")).toBeNull();
     expect(sendFallbackToken("old", 401, undefined)).toBeNull();
+    expect(sendFallbackToken("ffl_live_MARKED", 401, "vault-token")).toBeNull();
+    expect(sendFallbackToken("ffl_live_MARKED", 403, "vault-token")).toBeNull();
+  });
+});
+
+describe("ruckus_send confinement", () => {
+  afterEach(() => {
+    delete process.env.RUCKUS_SEND_TOKEN;
+    delete process.env.VESTLAUNCH_BASE_URL;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not retry a marked or malformed CRM key with the vault token", async () => {
+    process.env.RUCKUS_SEND_TOKEN = "vault-token";
+    process.env.VESTLAUNCH_BASE_URL = "https://crm.example.invalid";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const auth = ((init?.headers ?? {}) as Record<string, string>).Authorization ?? "";
+      if (String(url).endsWith("/api/v1/me")) {
+        const identity = auth.endsWith("MARKED")
+          ? { mcpProfile: "onboarding", scopes: ["mcp:onboarding"], business: "ffl", workspaceIds: ["ws"] }
+          : "Cranbrook Forest";
+        return new Response(JSON.stringify({ data: { identity } }), { status: 200 });
+      }
+      throw new Error("ruckus-send must not be called");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const marked = await ruckusSend({ text: "hello" }, "ffl_live_MARKED");
+    expect(marked).toEqual({ ok: false, error: "This key cannot use Ruckus." });
+    const malformed = await ruckusSend({ text: "hello" }, "ffl_live_OTHER");
+    expect(malformed).toEqual({ ok: false, error: "This key cannot use Ruckus." });
+    expect(fetchMock.mock.calls.every((call) => String(call[0]).endsWith("/api/v1/me"))).toBe(true);
+  });
+
+  it("forwards an unmarked CRM key once and does not upgrade a 401", async () => {
+    process.env.RUCKUS_SEND_TOKEN = "vault-token";
+    process.env.VESTLAUNCH_BASE_URL = "https://crm.example.invalid";
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/api/v1/me")) {
+        return new Response(JSON.stringify({ data: { identity: { scopes: ["contacts:read"], name: "Existing" } } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "refused" }), { status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await ruckusSend({ text: "hello" }, "ffl_live_EXISTING");
+    expect(result).toMatchObject({ ok: false, status: 401 });
+    const posts = fetchMock.mock.calls.filter((call) => String(call[0]).includes("ruckus-send"));
+    expect(posts).toHaveLength(1);
+    expect((posts[0]?.[1] as RequestInit).headers).toMatchObject({ Authorization: "Bearer ffl_live_EXISTING" });
+  });
+
+  it("still retries a refused non-CRM vault bearer once", async () => {
+    process.env.RUCKUS_SEND_TOKEN = "vault-token";
+    process.env.VESTLAUNCH_BASE_URL = "https://crm.example.invalid";
+    const bearers: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      bearers.push(headers.Authorization);
+      return new Response("{}", { status: bearers.length === 1 ? 401 : 200 });
+    }));
+    const result = await ruckusSend({ text: "hello" }, "old-cron-secret");
+    expect(bearers).toEqual(["Bearer old-cron-secret", "Bearer vault-token"]);
+    expect(result).toEqual({});
   });
 });

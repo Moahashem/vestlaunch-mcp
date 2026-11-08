@@ -56,6 +56,10 @@ import {
 import { isCranbrookTool, loadCranbrookTools, runCranbrookTool, type CranbrookTool } from "./_ruckus-cranbrook";
 import { ASSISTANT_TOOLS, isAssistantTool, runAssistantTool } from "./_ruckus-assistant";
 import { ORDER_TOOLS, isOrderTool, runOrderTool } from "./_ruckus-orders";
+import { readAccessToken } from "./_oauth";
+import { readMcpProfile } from "./_mcp-onboarding-policy";
+
+const CRM_KEY_PREFIX = "ffl_live_";
 
 // 120s: a mailbox cleanup (unsubscribe + trash up to 500 messages) can take a minute.
 export const config = { maxDuration: 300 };
@@ -1037,21 +1041,56 @@ function baseUrl(): string {
   return "https://crm.vestlaunch.com";
 }
 
-/** Pure: the token to retry a refused post with, or null (no retry). */
+/**
+ * Pure: the token to retry a refused post with, or null (no retry).
+ * A CRM key is never upgraded to RUCKUS_SEND_TOKEN. The retry remains for a
+ * previous vault cron secret, which does not use the ffl_live_ prefix.
+ */
 export function sendFallbackToken(used: string, status: number, envToken: string | undefined): string | null {
   const env = (envToken ?? "").trim();
+  const presented = used.trim();
   if (status !== 401 && status !== 403) return null;
-  if (!env || env === used.trim()) return null;
+  if (!env || env === presented) return null;
+  if (presented.startsWith(CRM_KEY_PREFIX)) return null;
   return env;
 }
 
-async function ruckusSend(args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
+async function presentedCrmKey(presented: string): Promise<string | null> {
+  if (presented.startsWith(CRM_KEY_PREFIX)) return presented;
+  if (!presented) return null;
+  try {
+    const key = (await readAccessToken(presented)).crmKey;
+    return key.startsWith(CRM_KEY_PREFIX) ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A CRM key may be forwarded as itself only when its identity object omits mcpProfile. */
+async function crmKeyBlockedFromRuckus(crmKey: string): Promise<boolean> {
+  const base = (process.env.VESTLAUNCH_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (!base) return true;
+  try {
+    const response = await fetch(`${base}/api/v1/me`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${crmKey}`, Accept: "application/json" },
+    });
+    if (!response.ok) return true;
+    const body = (await response.json()) as { data?: { identity?: unknown } };
+    return readMcpProfile(body.data?.identity) !== "absent";
+  } catch {
+    return true;
+  }
+}
+
+export async function ruckusSend(args: Record<string, unknown>, forwardToken?: string): Promise<unknown> {
   const text = typeof args.text === "string" ? args.text.trim() : "";
   if (!text) throw new Error("ruckus_send requires a non-empty 'text'.");
 
-  // Prefer the bearer the agent presented (the vault-injected CRM credential),
-  // forwarded straight through; fall back to the RUCKUS_SEND_TOKEN env var.
-  const token = (forwardToken ?? "").trim() || (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
+  // Prefer the bearer the agent presented (the vault-injected cron credential),
+  // forwarded straight through. A CRM key is never retried with the vault token.
+  const presented = (forwardToken ?? "").trim();
+  const token = presented || (process.env.RUCKUS_SEND_TOKEN ?? "").trim();
   if (!token) {
     throw new Error(
       "ruckus_send is not configured: set RUCKUS_SEND_TOKEN in this MCP's env " +
@@ -1080,10 +1119,26 @@ async function ruckusSend(args: Record<string, unknown>, forwardToken?: string):
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+    const crmKey = presented ? await presentedCrmKey(presented) : null;
+    if (crmKey) {
+      if (await crmKeyBlockedFromRuckus(crmKey)) {
+        return { ok: false, error: "This key cannot use Ruckus." };
+      }
+      const own = await post(crmKey);
+      const ownText = await own.text();
+      let ownJson: unknown = null;
+      try {
+        ownJson = ownText ? JSON.parse(ownText) : null;
+      } catch {
+        ownJson = { raw: ownText };
+      }
+      if (!own.ok) return { ok: false, status: own.status, error: ownJson ?? ownText };
+      return ownJson ?? { ok: true };
+    }
     let res = await post(token);
     // 2026-11-06: the CRM's CRON_SECRET was rotated and the vault credential kept the old one,
-    // so every post was refused for five hours. If the presented bearer is refused and this
-    // server holds a different token, try that one once before giving up.
+    // so every post was refused for five hours. A refused non-CRM bearer may be retried once
+    // with RUCKUS_SEND_TOKEN. CRM keys take the branch above and never reach this retry.
     const fallback = sendFallbackToken(token, res.status, process.env.RUCKUS_SEND_TOKEN);
     if (fallback) res = await post(fallback);
     const out = await res.text();

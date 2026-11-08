@@ -19,14 +19,20 @@ export const ONBOARDING_ALLOWLIST: readonly { name: string; method: string; path
 ];
 
 const BUSINESS = new Set(["ffl", "cranbrook", "both"]);
-const SCOPE_TOKEN = /^[A-Za-z0-9_:*]+$/;
 
 export type ProfileRead = "absent" | "onboarding" | "malformed";
 
+function plainIdentity(identity: unknown): identity is Record<string, unknown> {
+  return identity !== null && typeof identity === "object" && !Array.isArray(identity);
+}
+
 export function readMcpProfile(identity: unknown): ProfileRead {
-  if (!identity || typeof identity !== "object") return "absent";
+  // Missing identity stays on the existing surface. A string, array, or other
+  // non-object is not a successful identity and must not be treated as unmarked.
+  if (identity == null) return "absent";
+  if (!plainIdentity(identity)) return "malformed";
   if (!Object.prototype.hasOwnProperty.call(identity, "mcpProfile")) return "absent";
-  const value = (identity as Record<string, unknown>).mcpProfile;
+  const value = identity.mcpProfile;
   if (value === ONBOARDING_PROFILE) return "onboarding";
   return "malformed";
 }
@@ -60,8 +66,8 @@ export function readOnboardingClaims(
     return { ok: false, reason: "CRM identity is missing." };
   }
   const raw = identity as Record<string, unknown>;
-  if (!Array.isArray(raw.scopes) || raw.scopes.length === 0 || raw.scopes.some((s) => typeof s !== "string" || !SCOPE_TOKEN.test(s))) {
-    return { ok: false, reason: "scopes are missing or malformed." };
+  if (!Array.isArray(raw.scopes) || raw.scopes.length !== 1 || raw.scopes[0] !== "mcp:onboarding") {
+    return { ok: false, reason: "onboarding keys must carry only the mcp:onboarding scope." };
   }
   const business = raw.business;
   if (business !== "ffl" && business !== "cranbrook" && business !== "both") {

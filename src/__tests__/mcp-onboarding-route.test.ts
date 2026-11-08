@@ -18,6 +18,7 @@ import { argumentsStayInsideOnboarding, legacySurfaceDecision, onboardingAllows,
 import mcp from "../../api/mcp.js";
 import onboarding from "../../api/mcp-onboarding.js";
 import migration from "../../api/company-numbers-agent-migration.js";
+import sheets from "../../api/sheets-mcp.js";
 
 const KEY = "ffl_live_SCOPEDBOTVALUE";
 const SHARED = "shared-fixture-token";
@@ -91,7 +92,7 @@ async function post(
 
 const classified = {
   mcpProfile: "onboarding",
-  scopes: ["properties:read"],
+  scopes: ["mcp:onboarding"],
   business: "ffl",
   workspaceIds: ["ws_ffl"],
   name: "Cranbrook Forest",
@@ -300,6 +301,8 @@ describe("onboarding route", () => {
     await onboarding(req(`Bearer ${KEY}`), res as unknown as ServerResponse);
     expect(res.statusCode).toBe(403);
     expect(res.body).toContain("business must be");
+    expect(readOnboardingClaims({ ...classified, scopes: ["*"] }).ok).toBe(false);
+    expect(readOnboardingClaims({ ...classified, scopes: ["properties:read"] }).ok).toBe(false);
     expect(readOnboardingClaims({ ...classified, workspaceIds: ["ffl"] }).ok).toBe(false);
     expect(readOnboardingClaims({ ...classified, businesses: ["both"] }).ok).toBe(false);
     expect(readOnboardingClaims({ ...classified, business: "both", businesses: ["ffl"] }).ok).toBe(false);
@@ -352,6 +355,40 @@ describe("onboarding route", () => {
       .map((call) => (call[1] as RequestInit).headers as Record<string, string>);
     expect(authorizations.every((headers) => headers.Authorization === `Bearer ${KEY}`)).toBe(true);
     expect(JSON.stringify(authorizations)).not.toContain("PRIVILEGEDVALUE");
+  });
+
+  it("treats a string or array identity as malformed on both HTTP routes", async () => {
+    process.env.VESTLAUNCH_BASE_URL = "https://crm.example.invalid";
+    process.env.VESTLAUNCH_API_KEY = ENV_KEY;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      data: { identity: "Cranbrook Forest", capabilities: [] },
+    }), { status: 200 })));
+    const legacy = resCapture();
+    await mcp(req(`Bearer ${KEY}`), legacy as unknown as ServerResponse);
+    expect(legacy.statusCode).toBe(403);
+    const scoped = resCapture();
+    await onboarding(req(`Bearer ${KEY}`), scoped as unknown as ServerResponse);
+    expect(scoped.statusCode).toBe(403);
+    expect(legacy.body).not.toContain("PRIVILEGEDVALUE");
+  });
+
+  it("does not let a marked key list sheet tools", async () => {
+    process.env.VESTLAUNCH_BASE_URL = "https://crm.example.invalid";
+    process.env.VESTLAUNCH_API_KEY = ENV_KEY;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      data: {
+        identity: classified,
+        capabilities: [{ name: "sheets_read", method: "GET", path: "/api/v1/sheets/read", scope: "properties:read", description: "Read." }],
+      },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = resCapture();
+    const request = req(`Bearer ${KEY}`);
+    request.url = "/api/sheets-mcp";
+    await sheets(request, res as unknown as ServerResponse);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toContain("sheets_read");
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({ Authorization: `Bearer ${KEY}` });
   });
 
   it("does not let an onboarding key use the company-numbers inspection route", async () => {

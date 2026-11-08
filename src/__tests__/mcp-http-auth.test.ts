@@ -88,6 +88,34 @@ describe("hosted MCP credentials", () => {
     expect(res.body).not.toContain("SUPERSECRETVALUE");
   });
 
+  it("refuses a scoped key with no business and does not retry with the shared key", async () => {
+    process.env.VESTLAUNCH_API_KEY = "ffl_live_PRIVILEGEDFALLBACK";
+    const caller = "ffl_live_SCOPEDCALLERVALUE";
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            identity: { scopes: ["properties:read"], name: "Cranbrook Forest" },
+            capabilities: [{ name: "list_contacts", method: "GET", path: "/api/v1/contacts", scope: "contacts:read", description: "List." }],
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { default: handler } = await import("../../api/mcp.js");
+    const res = resCapture();
+    await handler(req(`Bearer ${caller}`), res as unknown as ServerResponse);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toContain("business is missing");
+    expect(res.body).toContain("workspaceIds");
+    expect(res.body).not.toContain("SCOPEDCALLERVALUE");
+    expect(res.body).not.toContain("PRIVILEGEDFALLBACK");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${caller}`);
+  });
+
   it("redacts a credential if the CRM puts one in an error", async () => {
     vi.stubGlobal(
       "fetch",
@@ -98,6 +126,6 @@ describe("hosted MCP credentials", () => {
     await handler(req(`Bearer ${KEY}`), res as unknown as ServerResponse);
     expect(res.statusCode).toBe(500);
     expect(res.body).not.toContain("SUPERSECRETVALUE");
-    expect(res.body).toContain("ffl_live_[redacted]");
+    expect(res.body).toContain("ffl_[redacted]");
   });
 });

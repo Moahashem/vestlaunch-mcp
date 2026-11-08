@@ -14,16 +14,35 @@
 export type Business = "ffl" | "cranbrook";
 export type Effect = "read" | "write" | "send" | "payment";
 
+/**
+ * `scoped` is a per-agent CRM key or an OAuth session. It is refused unless
+ * /api/v1/me matches REQUIRED_IDENTITY_SHAPE.
+ * `legacy-shared` is only the explicit shared MCP_BEARER_TOKEN path (and the
+ * local stdio process unless VESTLAUNCH_AUTH_MODE=scoped). It is not a silent
+ * reading of a missing business field.
+ */
+export type AuthorityMode = "legacy-shared" | "scoped";
+
 export interface CallerIdentity {
+  authority: AuthorityMode;
+  /** False when a scoped key's identity is missing, malformed, or contradictory. */
+  authorityOk: boolean;
+  authorityError?: string;
   apiKeyId?: string;
   name?: string;
   email?: string;
   scopes: string[];
-  /** Empty when /api/v1/me did not declare a business. Not a grant of both. */
   businesses: Business[];
-  /** Empty when /api/v1/me did not declare workspace ids. */
   workspaceIds: string[];
 }
+
+/** Exact fields a scoped key's GET /api/v1/me data.identity must carry. */
+export const REQUIRED_IDENTITY_SHAPE =
+  'data.identity.scopes (non-empty array of scope strings; "*" is the wildcard grant), ' +
+  'data.identity.business ("ffl" | "cranbrook" | "both"), ' +
+  "and data.identity.workspaceIds (non-empty array of workspace ids). " +
+  "Only those exact business tokens count. Display names, slugs, and aliases are not authority. " +
+  'A manifest tool whose scope is "*" requires the key to hold "*".';
 
 export interface ToolRule {
   name: string;
@@ -43,118 +62,135 @@ export type Decision = { ok: true } | { ok: false; reason: string };
 
 const WRITE_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
-const FFL_ALIASES = new Set([
-  "ffl",
-  "flat fee landlord",
-  "flatfeelandlord",
-  "flat-fee-landlord",
-  "landlord",
-]);
-const CRANBROOK_ALIASES = new Set([
-  "cranbrook",
-  "cranbrook forest",
-  "cranbrook-forest",
-  "cfa",
-  "resman",
-]);
+/** How far caller arguments may nest before the call is rejected. */
+export const SELECTOR_DEPTH_BUDGET = 6;
 
-const SELECTOR_KEYS = new Set([
-  "workspaceId",
-  "workspace_id",
-  "workspace",
-  "business",
-  "businessId",
-  "business_id",
-  "tenant",
-  "tenantId",
-  "tenant_id",
-]);
-
-const WORKSPACE_KEYS = new Set([
-  "workspaceId",
-  "workspace_id",
-  "workspace",
-  "tenant",
-  "tenantId",
-  "tenant_id",
-]);
-
+const BUSINESS_TOKENS = new Set(["ffl", "cranbrook", "both"]);
 const WIDEN = new Set(["", "*", "all", "any", "none"]);
+const SCOPE_TOKEN = /^[A-Za-z0-9_:*]+$/;
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-export function normalizeBusiness(value: string): Business | null {
-  const s = value.trim().toLowerCase();
-  if (FFL_ALIASES.has(s)) return "ffl";
-  if (CRANBROOK_ALIASES.has(s)) return "cranbrook";
-  return null;
+type BusinessClaim = Business | "both";
+
+/** Exact token only. "Cranbrook Forest", "FFL", and slugs are not businesses. */
+function exactBusinessToken(value: unknown): BusinessClaim | "malformed" | "absent" {
+  if (value === undefined || value === null) return "absent";
+  if (typeof value !== "string") return "malformed";
+  const s = value.trim();
+  if (s === "ffl" || s === "cranbrook" || s === "both") return s;
+  return "malformed";
 }
 
-function addBusiness(into: Set<Business>, value: unknown): void {
-  if (typeof value !== "string") return;
-  const b = normalizeBusiness(value);
-  if (b) into.add(b);
-}
-
-function addWorkspaceId(into: Set<string>, value: unknown): void {
-  if (typeof value !== "string") return;
-  const id = value.trim();
-  if (!id || normalizeBusiness(id)) return;
-  into.add(id);
-}
-
-function absorbBinding(value: unknown, businesses: Set<Business>, workspaceIds: Set<string>): void {
-  if (typeof value === "string") {
-    addBusiness(businesses, value);
-    addWorkspaceId(workspaceIds, value);
-    return;
+function readWorkspaceIds(value: unknown): { ids: string[] } | { error: string } | { missing: true } {
+  if (value === undefined || value === null) return { missing: true };
+  if (!Array.isArray(value)) return { error: "workspaceIds is malformed" };
+  if (value.length === 0) return { error: "workspaceIds is empty" };
+  const ids: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || item.trim() === "" || item !== item.trim()) {
+      return { error: "workspaceIds is malformed" };
+    }
+    if (BUSINESS_TOKENS.has(item) || WIDEN.has(item.toLowerCase())) {
+      return { error: "workspaceIds contains a business alias, not a workspace id" };
+    }
+    if (!ids.includes(item)) ids.push(item);
   }
-  if (Array.isArray(value)) {
-    for (const item of value) absorbBinding(item, businesses, workspaceIds);
-    return;
-  }
-  if (!isObj(value)) return;
-  addBusiness(businesses, value.business ?? value.slug ?? value.name);
-  addWorkspaceId(workspaceIds, value.id ?? value.workspaceId ?? value.workspace_id);
-  if (Array.isArray(value.workspaceIds)) {
-    for (const id of value.workspaceIds) addWorkspaceId(workspaceIds, id);
-  }
-  if (Array.isArray(value.workspaces)) absorbBinding(value.workspaces, businesses, workspaceIds);
-  if (value.workspace && value.workspace !== value) absorbBinding(value.workspace, businesses, workspaceIds);
+  return { ids };
 }
 
-/** Read the identity /api/v1/me already returns. Unknown shapes yield no grants. */
-export function parseCallerIdentity(raw: unknown): CallerIdentity {
+/**
+ * Read /api/v1/me data.identity.
+ * `mode` chooses the contract. Scoped keys do not treat a missing business as
+ * access to both companies. Names and slugs are never read as grants.
+ */
+export function parseCallerIdentity(raw: unknown, mode: AuthorityMode): CallerIdentity {
   const o = isObj(raw) ? raw : {};
-  const scopes = Array.isArray(o.scopes) ? o.scopes.filter((s): s is string => typeof s === "string") : [];
-  const businesses = new Set<Business>();
-  const workspaceIds = new Set<string>();
-  if (typeof o.business === "string" && /^(both|ffl\+cranbrook)$/i.test(o.business.trim())) {
-    businesses.add("ffl");
-    businesses.add("cranbrook");
-  } else {
-    addBusiness(businesses, o.business);
-  }
-  if (Array.isArray(o.businesses)) {
-    for (const b of o.businesses) addBusiness(businesses, b);
-  }
-  absorbBinding(o.workspaceIds, businesses, workspaceIds);
-  absorbBinding(o.workspaces, businesses, workspaceIds);
-  absorbBinding(o.workspace, businesses, workspaceIds);
-  addWorkspaceId(workspaceIds, o.workspaceId ?? o.workspace_id);
   const name =
     (typeof o.agentName === "string" && o.agentName) ||
     (typeof o.name === "string" && o.name) ||
     undefined;
-  return {
+  const base = {
+    authority: mode,
     apiKeyId: typeof o.apiKeyId === "string" ? o.apiKeyId : undefined,
     name,
     email: typeof o.email === "string" ? o.email : undefined,
-    scopes,
-    businesses: [...businesses],
-    workspaceIds: [...workspaceIds],
+  };
+
+  let scopeError: string | undefined;
+  const scopes: string[] = [];
+  if (!Array.isArray(o.scopes)) scopeError = "scopes is missing or malformed";
+  else {
+    for (const scope of o.scopes) {
+      if (typeof scope !== "string" || !SCOPE_TOKEN.test(scope)) {
+        scopeError = "scopes is malformed";
+        break;
+      }
+      scopes.push(scope);
+    }
+    if (!scopeError && scopes.length === 0) scopeError = "scopes is empty";
+  }
+
+  const businessToken = exactBusinessToken(o.business);
+  let fromList: Business[] | undefined;
+  let listError: string | undefined;
+  if (o.businesses !== undefined) {
+    if (!Array.isArray(o.businesses)) listError = "businesses is malformed";
+    else {
+      fromList = [];
+      for (const item of o.businesses) {
+        const token = exactBusinessToken(item);
+        if (token === "absent" || token === "malformed" || token === "both") {
+          listError = "businesses is malformed";
+          break;
+        }
+        if (!fromList.includes(token)) fromList.push(token);
+      }
+    }
+  }
+
+  const workspaces = readWorkspaceIds(o.workspaceIds);
+  let businesses: Business[] = [];
+  let conflict: string | undefined;
+  if (businessToken === "malformed") conflict = "business is malformed";
+  else if (listError) conflict = listError;
+  else if (businessToken === "both") {
+    if (fromList && (fromList.length !== 2 || !fromList.includes("ffl") || !fromList.includes("cranbrook"))) {
+      conflict = "business claims conflict";
+    }
+    businesses = ["ffl", "cranbrook"];
+  } else if (businessToken === "ffl" || businessToken === "cranbrook") {
+    if (fromList && (fromList.length !== 1 || fromList[0] !== businessToken)) conflict = "business claims conflict";
+    businesses = [businessToken];
+  } else if (fromList && fromList.length > 0) {
+    businesses = fromList;
+  }
+
+  const workspaceIds = "ids" in workspaces ? workspaces.ids : [];
+  const parts = [scopeError, conflict, "error" in workspaces ? workspaces.error : undefined].filter(Boolean);
+  if (mode === "legacy-shared") {
+    return {
+      ...base,
+      authorityOk: true,
+      scopes: scopeError ? [] : scopes,
+      businesses,
+      workspaceIds,
+      authorityError: parts.length > 0 ? `Legacy shared token is not tenant-scoped. ${parts.join("; ")}` : undefined,
+    };
+  }
+
+  if ("missing" in workspaces) parts.push("workspaceIds is missing");
+  if (businesses.length === 0 && !conflict && businessToken !== "malformed") parts.push("business is missing");
+  const authorityError = parts.length > 0 ? `${parts.join("; ")}. ${REQUIRED_IDENTITY_SHAPE}` : undefined;
+  return {
+    ...base,
+    authorityOk: !authorityError,
+    authorityError,
+    scopes: scopeError ? [] : scopes,
+    businesses: authorityError ? [] : businesses,
+    workspaceIds: authorityError ? [] : workspaceIds,
   };
 }
 
@@ -230,19 +266,30 @@ export function listToolRules(): readonly ToolRule[] {
   return RULES;
 }
 
-function scopeSatisfies(effect: Effect, granted: readonly string[], required: string): boolean {
-  if (required === "*") return true;
+/**
+ * A tool scope of `*` is a requirement that the key hold `*`.
+ * It does not authorize a key with no scopes. A key that holds `*` still
+ * satisfies a specific scope. A `:read` scope never satisfies a write,
+ * send, or payment.
+ */
+export function scopeGrants(effect: Effect, granted: readonly string[], required: string): boolean {
+  if (granted.length === 0 || required.length === 0) return false;
+  if (required === "*") return granted.includes("*");
   if (granted.includes("*")) return true;
   if (!granted.includes(required)) return false;
   if (effect === "read") return true;
-  // A read scope never authorizes a write, send, or payment, even if a tool
-  // description used to claim that it did.
   return !required.endsWith(":read");
 }
 
 function businessAllowed(identity: CallerIdentity, business: Business | "any"): Decision | null {
+  if (identity.authority === "scoped" && !identity.authorityOk) {
+    return { ok: false, reason: identity.authorityError ?? "This agent's CRM identity has no business authority." };
+  }
+  // Legacy shared mode is explicit: it is not filtered by business, because
+  // the CRM has not been asked to describe that token's business. Callers
+  // still cannot pass a workspace or business selector.
+  if (identity.authority === "legacy-shared") return null;
   if (business === "any") return null;
-  if (identity.businesses.length === 0) return null;
   if (identity.businesses.includes(business)) return null;
   return { ok: false, reason: "This agent's key is not authorized for that business." };
 }
@@ -253,7 +300,7 @@ function decide(identity: CallerIdentity, tool: ToolRule, enableWrites: boolean)
   if (tool.effect !== "read" && tool.writesFlag && !enableWrites) {
     return { ok: false, reason: "Writes are not enabled for this connection." };
   }
-  if (!tool.scopes.some((required) => scopeSatisfies(tool.effect, identity.scopes, required))) {
+  if (!tool.scopes.some((required) => scopeGrants(tool.effect, identity.scopes, required))) {
     return { ok: false, reason: "This agent's key does not include the scope for that tool." };
   }
   return { ok: true };
@@ -373,7 +420,7 @@ export function permitManifestTool(
     return { ok: false, reason: "Writes are not enabled for this connection." };
   }
   const effect: Effect = isWrite ? effectOfManifest(tool) : "read";
-  if (!scopeSatisfies(effect, identity.scopes, tool.scope)) {
+  if (!scopeGrants(effect, identity.scopes, tool.scope)) {
     return { ok: false, reason: "This agent's key does not include the scope for that tool." };
   }
   const business = businessAllowed(identity, businessOfManifest(tool));
@@ -387,103 +434,107 @@ export type ConfineResult =
   | { ok: true; args: Record<string, unknown> }
   | { ok: false; reason: string };
 
+type SelectorKind = "workspace" | "business" | "tenant";
+
 interface SelectorHit {
-  key: string;
+  kind: SelectorKind;
   value: string;
 }
 
-function walkSelectors(node: unknown, hits: SelectorHit[], depth: number): void {
-  if (depth > 6) return;
-  if (Array.isArray(node)) {
-    for (const item of node) walkSelectors(item, hits, depth + 1);
-    return;
-  }
-  if (!isObj(node)) return;
-  for (const [key, value] of Object.entries(node)) {
-    if (SELECTOR_KEYS.has(key)) {
-      const values = Array.isArray(value) ? value : [value];
-      for (const item of values) {
-        hits.push({
-          key,
-          value: item === undefined || item === null ? "" : String(item).trim(),
-        });
-      }
-    }
-    if (isObj(value) || Array.isArray(value)) walkSelectors(value, hits, depth + 1);
-  }
-}
-
-function stripWiden(node: unknown, depth: number): void {
-  if (depth > 6) return;
-  if (Array.isArray(node)) {
-    for (const item of node) stripWiden(item, depth + 1);
-    return;
-  }
-  if (!isObj(node)) return;
-  for (const key of Object.keys(node)) {
-    if (SELECTOR_KEYS.has(key)) {
-      const value = node[key];
-      const text = value === undefined || value === null ? "" : String(value).trim().toLowerCase();
-      if (WIDEN.has(text)) delete node[key];
-    } else {
-      stripWiden(node[key], depth + 1);
-    }
-  }
+/** workspaceId, workspace_id, Workspace-Id, businessId, tenant_id, and the same without "id". */
+function selectorKind(key: string): SelectorKind | null {
+  const flat = key.replace(/[_-]/g, "").toLowerCase();
+  if (flat === "workspaceid" || flat === "workspace") return "workspace";
+  if (flat === "businessid" || flat === "business") return "business";
+  if (flat === "tenantid" || flat === "tenant") return "tenant";
+  return null;
 }
 
 /**
- * Caller-supplied workspace and business ids do not expand the key.
- *
- * When the identity lists workspace ids, an id outside that list is denied
- * (including one buried in a pagination query). Omitting the id on a
- * single-workspace key pins the call to that workspace so "omit means all"
- * cannot page into another one.
- *
- * When the identity lists no workspace ids, opaque ids are left in place so
- * existing filters keep working. The CRM must reject an id that belongs to
- * the other business; this server cannot see that binding until /api/v1/me
- * returns workspaceIds. A business slug the key is not allowed to use, or a
- * slug that contradicts the tool's business, is denied either way.
+ * Returns the selectors found, or `too-deep` when a value sits past the budget.
+ * Stopping early and forwarding the rest would hide a nested selector.
+ */
+function walkSelectors(node: unknown, hits: SelectorHit[], depth: number): "ok" | "too-deep" {
+  if (depth > SELECTOR_DEPTH_BUDGET) return "too-deep";
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      if (walkSelectors(item, hits, depth + 1) === "too-deep") return "too-deep";
+    }
+    return "ok";
+  }
+  if (!isObj(node)) return "ok";
+  for (const [key, value] of Object.entries(node)) {
+    const kind = selectorKind(key);
+    if (kind) {
+      const values = Array.isArray(value) ? value : [value];
+      for (const item of values) {
+        if (isObj(item) || Array.isArray(item)) {
+          if (walkSelectors(item, hits, depth + 1) === "too-deep") return "too-deep";
+          continue;
+        }
+        hits.push({
+          kind,
+          value: item === undefined || item === null ? "" : String(item).trim(),
+        });
+      }
+      continue;
+    }
+    if (isObj(value) || Array.isArray(value)) {
+      if (depth === SELECTOR_DEPTH_BUDGET) return "too-deep";
+      if (walkSelectors(value, hits, depth + 1) === "too-deep") return "too-deep";
+    }
+  }
+  return "ok";
+}
+
+/**
+ * Caller selectors never choose a business. The only value that may be
+ * supplied is the key's single pinned workspace id, on a workspace field.
+ * businessId, tenant, aliases such as "ffl", and anything nested past the
+ * budget are denied. The same rules apply to synthetic tools, manifest
+ * tools, and stdio.
  */
 export function confineArguments(
   identity: CallerIdentity,
   args: Record<string, unknown>,
   where: ConfineWhere,
-  toolBusiness: Business | "any" = "any",
+  _toolBusiness: Business | "any" = "any",
 ): ConfineResult {
-  const copy = JSON.parse(JSON.stringify(args ?? {})) as Record<string, unknown>;
+  if (identity.authority === "scoped" && !identity.authorityOk) {
+    return { ok: false, reason: identity.authorityError ?? "This agent's CRM identity has no business authority." };
+  }
+  let copy: Record<string, unknown>;
+  try {
+    copy = JSON.parse(JSON.stringify(args ?? {})) as Record<string, unknown>;
+  } catch {
+    return { ok: false, reason: "Tool arguments could not be read." };
+  }
   const hits: SelectorHit[] = [];
-  walkSelectors(copy, hits, 0);
+  if (walkSelectors(copy, hits, 0) === "too-deep") {
+    return { ok: false, reason: "Tool arguments nest past the traversal budget." };
+  }
 
+  const allowed = new Set(identity.workspaceIds);
   for (const hit of hits) {
-    const widened = WIDEN.has(hit.value.toLowerCase());
-    if (widened && (identity.workspaceIds.length > 0 || identity.businesses.length > 0)) {
-      return { ok: false, reason: "This agent's key cannot clear its workspace or business filter." };
+    if (hit.kind !== "workspace") {
+      return { ok: false, reason: "A caller cannot set business or tenant. The CRM key decides that." };
     }
-    const asBusiness = normalizeBusiness(hit.value);
-    if (asBusiness) {
-      if (toolBusiness !== "any" && asBusiness !== toolBusiness) {
-        return { ok: false, reason: "This agent's key is not authorized for that business." };
-      }
-      if (identity.businesses.length > 0 && !identity.businesses.includes(asBusiness)) {
-        return { ok: false, reason: "This agent's key is not authorized for that business." };
-      }
-      continue;
+    if (WIDEN.has(hit.value.toLowerCase()) || BUSINESS_TOKENS.has(hit.value)) {
+      return { ok: false, reason: "A workspace alias is not an authorized workspace id." };
     }
-    if (!WORKSPACE_KEYS.has(hit.key)) continue;
-    if (identity.workspaceIds.length > 0 && hit.value !== "" && !identity.workspaceIds.includes(hit.value)) {
+    if (!allowed.has(hit.value)) {
       return { ok: false, reason: "This agent's key is not authorized for that workspace." };
     }
   }
-
-  // An unbound key may keep a real workspace filter. "all" / "*" is not a filter.
-  if (identity.workspaceIds.length === 0 && identity.businesses.length === 0) stripWiden(copy, 0);
+  if (new Set(hits.map((hit) => hit.value)).size > 1) {
+    return { ok: false, reason: "This agent's key is not authorized for that workspace." };
+  }
 
   const pinned = identity.workspaceIds.length === 1 ? identity.workspaceIds[0] : undefined;
-  const suppliedWorkspace = hits.some(
-    (h) => WORKSPACE_KEYS.has(h.key) && !WIDEN.has(h.value.toLowerCase()) && !normalizeBusiness(h.value),
-  );
-  if (where !== "none" && pinned && !suppliedWorkspace) {
+  if (where !== "none" && identity.authority === "scoped" && identity.workspaceIds.length > 1 && hits.length === 0) {
+    return { ok: false, reason: "This key has more than one workspace. Name the one authorized workspace id." };
+  }
+  if (where !== "none" && pinned && hits.length === 0) {
     if (where === "query") {
       const query = isObj(copy.query) ? copy.query : {};
       query.workspaceId = pinned;
@@ -498,13 +549,17 @@ export function confineArguments(
 /** Remove credential material from text that might be logged or returned. */
 export function redactSecrets(text: string): string {
   return text
-    .replace(/ffl_live_[A-Za-z0-9_-]+/g, "ffl_live_[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "[jwt redacted]")
+    .replace(/ffl_[a-z0-9]+_[A-Za-z0-9_-]+/gi, "ffl_[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\bsk_(?:live|test)_[A-Za-z0-9]+/g, "sk_[redacted]")
-    .replace(/\bsk-ant-[A-Za-z0-9_-]+/g, "sk-ant-[redacted]");
+    .replace(/\bsk_(?:live|test)_[A-Za-z0-9_-]+/g, "sk_[redacted]")
+    .replace(/\bsk-ant-[A-Za-z0-9_-]+/g, "sk-ant-[redacted]")
+    .replace(/\b[A-Za-z0-9]{6,}(?:-[A-Za-z0-9]{4,}){3,}\b/g, "[token redacted]");
 }
 
 export interface AuditRecord {
+  authority: AuthorityMode;
+  authorityOk: boolean;
   apiKeyId?: string;
   agent?: string;
   tool: string;
@@ -520,6 +575,8 @@ export function auditRecord(input: {
   reason?: string;
 }): AuditRecord {
   return {
+    authority: input.identity.authority,
+    authorityOk: input.identity.authorityOk,
     apiKeyId: input.identity.apiKeyId,
     agent: input.identity.name,
     tool: input.tool,
@@ -527,4 +584,8 @@ export function auditRecord(input: {
     reason: redactSecrets(input.reason ?? ""),
     businesses: input.identity.businesses,
   };
+}
+
+export function formatAudit(record: AuditRecord): string {
+  return redactSecrets(JSON.stringify(record));
 }

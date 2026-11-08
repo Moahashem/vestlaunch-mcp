@@ -73,7 +73,7 @@ Auth:   Authorization: Bearer <that agent's own CRM key>
         or OAuth against this same host (Connect → /authorize)
 ```
 
-The key's scopes and, when the CRM declares them, its business and workspace ids decide which tools run. A read scope does not authorize a send, a payment, or a write. `?tools=` can only hide tools. Revoking the key in the CRM cuts off access, including token refresh. A legacy shared `MCP_BEARER_TOKEN` is still accepted for previously configured agents and behaves as before (env `VESTLAUNCH_API_KEY`, manifest writes off unless `VESTLAUNCH_ENABLE_WRITES=true`).
+A per-agent key is refused until `/api/v1/me` returns `business` (`ffl`, `cranbrook`, or `both`) and `workspaceIds`. The shared `MCP_BEARER_TOKEN` path is the explicit legacy exception and is not a fallback when a scoped key fails. A read scope does not authorize a send, a payment, or a write. `?tools=` can only hide tools. Revoking the key in the CRM cuts off access, including token refresh. Manifest writes on the legacy path stay off unless `VESTLAUNCH_ENABLE_WRITES=true`.
 
 ### 3. Try it
 

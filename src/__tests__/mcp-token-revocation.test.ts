@@ -69,7 +69,7 @@ describe("token revocation", () => {
     const refresh = await mintRefreshToken({ crmKey: KEY, clientId: "client" });
     const res = resCapture();
     await handler(
-      formReq(new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh })),
+      formReq(new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: "client" })),
       res as unknown as ServerResponse,
     );
     expect(res.statusCode).toBe(400);

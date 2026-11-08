@@ -26,13 +26,21 @@ import {
 const SECRET = "test-oauth-secret-16";
 
 function id(over: Partial<CallerIdentity> = {}): CallerIdentity {
+  const authority = over.authority ?? "scoped";
+  const scopes = over.scopes ?? [];
+  const businesses = over.businesses ?? [];
+  const workspaceIds = over.workspaceIds ?? [];
+  const complete = scopes.length > 0 && businesses.length > 0 && workspaceIds.length > 0;
   return {
-    apiKeyId: "key_test",
-    name: "fixture",
-    scopes: [],
-    businesses: [],
-    workspaceIds: [],
-    ...over,
+    authority,
+    authorityOk: over.authorityOk ?? (authority === "legacy-shared" || complete),
+    apiKeyId: over.apiKeyId ?? "key_test",
+    name: over.name ?? "fixture",
+    email: over.email,
+    scopes,
+    businesses,
+    workspaceIds,
+    authorityError: over.authorityError,
   };
 }
 
@@ -40,23 +48,23 @@ const read = id({ scopes: ["properties:read", "opportunities:read", "contacts:re
 const both = id({ scopes: ["*"], businesses: ["ffl", "cranbrook"], workspaceIds: ["ws_ffl", "ws_cran"] });
 
 describe("identity", () => {
-  it("reads businesses and workspace ids the CRM declares, and nothing it does not", () => {
-    expect(parseCallerIdentity({ scopes: ["contacts:read"], name: "Jordan" })).toMatchObject({
-      businesses: [],
-      workspaceIds: [],
-      name: "Jordan",
-    });
-    expect(
-      parseCallerIdentity({
-        scopes: ["properties:read"],
-        business: "both",
-        workspaces: [{ id: "ws_ffl", business: "ffl" }, { id: "ws_cran", slug: "cranbrook" }],
-      }).businesses.sort(),
-    ).toEqual(["cranbrook", "ffl"]);
-    expect(parseCallerIdentity({ business: "Cranbrook Forest", workspaceId: "ws_cran" })).toMatchObject({
-      businesses: ["cranbrook"],
-      workspaceIds: ["ws_cran"],
-    });
+  it("accepts only the exact business tokens and workspace ids", () => {
+    const missing = parseCallerIdentity({ scopes: ["contacts:read"], name: "Cranbrook Forest" }, "scoped");
+    expect(missing.authorityOk).toBe(false);
+    expect(missing.businesses).toEqual([]);
+    expect(missing.name).toBe("Cranbrook Forest");
+    const bothBiz = parseCallerIdentity(
+      { scopes: ["properties:read"], business: "both", workspaceIds: ["ws_ffl", "ws_cran"] },
+      "scoped",
+    );
+    expect(bothBiz.authorityOk).toBe(true);
+    expect(bothBiz.businesses.slice().sort()).toEqual(["cranbrook", "ffl"]);
+    const display = parseCallerIdentity(
+      { scopes: ["properties:read"], business: "Cranbrook Forest", workspaceIds: ["ws_cran"], workspaces: [{ slug: "cranbrook", name: "Cranbrook Forest" }] },
+      "scoped",
+    );
+    expect(display.authorityOk).toBe(false);
+    expect(display.businesses).toEqual([]);
   });
 });
 
@@ -78,11 +86,14 @@ describe("tool permission", () => {
     expect(exposeTool("get_ffl_occupancy", filter, read, { enableWrites: true })).toBe(false);
   });
 
-  it("keeps an existing wildcard key able to call the write it already had", () => {
-    expect(permitTool(id({ scopes: ["*"] }), "act_leasing_triage", { enableWrites: false }).ok).toBe(true);
-    expect(permitTool(id({ scopes: ["leasing:write"], businesses: ["cranbrook"] }), "record_tour_outcome", { enableWrites: true }).ok).toBe(true);
-    expect(permitTool(id({ scopes: ["properties:read"], businesses: ["cranbrook"] }), "set_office_closure", { enableWrites: true }).ok).toBe(false);
-    expect(permitOwnerBillingAction(id({ scopes: ["*"] }), { action: "undo" }, false).ok).toBe(true);
+  it("keeps an explicit legacy wildcard key, and a scoped wildcard only inside its businesses", () => {
+    const legacy = id({ authority: "legacy-shared", authorityOk: true, scopes: ["*"] });
+    expect(permitTool(legacy, "act_leasing_triage", { enableWrites: false }).ok).toBe(true);
+    const cran = id({ scopes: ["leasing:write"], businesses: ["cranbrook"], workspaceIds: ["ws_cran"] });
+    expect(permitTool(cran, "record_tour_outcome", { enableWrites: true }).ok).toBe(true);
+    expect(permitTool(id({ scopes: ["properties:read"], businesses: ["cranbrook"], workspaceIds: ["ws_cran"] }), "set_office_closure", { enableWrites: true }).ok).toBe(false);
+    expect(permitOwnerBillingAction(id({ scopes: ["*"], businesses: ["ffl"], workspaceIds: ["ws_ffl"] }), { action: "undo" }, false).ok).toBe(true);
+    expect(permitTool(id({ scopes: ["*"] }), "act_leasing_triage", { enableWrites: true }).ok).toBe(false);
     expect(permitTool(both, "get_ffl_occupancy", { enableWrites: true }).ok).toBe(true);
     expect(permitTool(both, "get_cfa_numbers", { enableWrites: true }).ok).toBe(true);
   });
@@ -94,24 +105,26 @@ describe("tool permission", () => {
     expect(buildToolDefinition({ name: "list_contacts", method: "GET", path: "/api/v1/contacts", scope: "contacts:read", description: "List." }, opts)).not.toBeNull();
     expect(
       permitManifestTool(
-        id({ scopes: ["communications:read"] }),
+        id({ scopes: ["communications:read"], businesses: ["ffl"], workspaceIds: ["ws_ffl"] }),
         { name: "send_sms", method: "POST", path: "/api/v1/communications", scope: "communications:read" },
         { enableWrites: true },
       ).ok,
     ).toBe(false);
     expect(
       permitManifestTool(
-        id({ scopes: ["communications:write"] }),
+        id({ scopes: ["communications:write"], businesses: ["ffl"], workspaceIds: ["ws_ffl"] }),
         { name: "send_sms", method: "POST", path: "/api/v1/communications", scope: "communications:write" },
         { enableWrites: true },
       ).ok,
     ).toBe(true);
   });
 
-  it("an undeclared business does not hide the tools existing keys already use", () => {
-    expect(exposeTool("get_ffl_occupancy", null, read, { enableWrites: true })).toBe(true);
-    expect(exposeTool("get_cfa_numbers", null, read, { enableWrites: true })).toBe(true);
-    expect(permitTool(read, "get_leasing_triage", { enableWrites: true }).ok).toBe(true);
+  it("a scoped key with no business sees neither family; legacy-shared still follows scopes", () => {
+    expect(exposeTool("get_ffl_occupancy", null, read, { enableWrites: true })).toBe(false);
+    expect(exposeTool("get_cfa_numbers", null, read, { enableWrites: true })).toBe(false);
+    const legacy = id({ authority: "legacy-shared", authorityOk: true, scopes: read.scopes });
+    expect(exposeTool("get_ffl_occupancy", null, legacy, { enableWrites: true })).toBe(true);
+    expect(exposeTool("get_cfa_numbers", null, legacy, { enableWrites: true })).toBe(true);
   });
 });
 
@@ -132,21 +145,28 @@ describe("workspace and pagination", () => {
     if (pinned.ok) expect(pinned.args.query).toMatchObject({ workspaceId: "ws_ffl", offset: 40 });
   });
 
-  it("allows the key's own workspace id and an opaque filter when the CRM sent no allow-list", () => {
+  it("allows only the pinned workspace id and denies an opaque id with no allow-list", () => {
     const own = confineArguments(bound, { query: { workspaceId: "ws_ffl", offset: 10 } }, "query");
     expect(own.ok).toBe(true);
     if (own.ok) expect((own.args.query as { workspaceId: string }).workspaceId).toBe("ws_ffl");
-    const legacy = confineArguments(id({ scopes: ["contacts:read"] }), { query: { workspaceId: "ws_legacy", offset: 0 } }, "query");
-    expect(legacy.ok).toBe(true);
-    if (legacy.ok) expect((legacy.args.query as { workspaceId: string }).workspaceId).toBe("ws_legacy");
+    const legacy = confineArguments(
+      id({ authority: "legacy-shared", authorityOk: true, scopes: ["contacts:read"] }),
+      { query: { workspaceId: "ws_legacy", offset: 0 } },
+      "query",
+    );
+    expect(legacy.ok).toBe(false);
   });
 
-  it("refuses a business slug for the other company and a cleared filter", () => {
+  it("refuses a business alias and a cleared filter", () => {
+    expect(confineArguments(bound, { workspaceId: "ffl" }, "none", "ffl").ok).toBe(false);
     expect(confineArguments(bound, { workspaceId: "cranbrook" }, "none", "ffl").ok).toBe(false);
     expect(confineArguments(bound, { query: { workspaceId: "*", offset: 0 } }, "query").ok).toBe(false);
-    const unbound = confineArguments(id({ scopes: ["*"] }), { query: { workspaceId: "all", offset: 5 } }, "query");
-    expect(unbound.ok).toBe(true);
-    if (unbound.ok) expect(unbound.args.query).toEqual({ offset: 5 });
+    const legacy = confineArguments(
+      id({ authority: "legacy-shared", authorityOk: true, scopes: ["*"] }),
+      { query: { workspaceId: "all", offset: 5 } },
+      "query",
+    );
+    expect(legacy.ok).toBe(false);
   });
 
   it("does not call the CRM when the workspace is refused", async () => {
@@ -176,7 +196,9 @@ describe("audit redaction", () => {
     expect(text).not.toContain("sk_live_abc");
     expect(text).toContain("Bearer [redacted]");
     expect(text).toContain("key_test");
-    expect(redactSecrets("key ffl_live_SUPERSECRETVALUE")).toContain("ffl_live_[redacted]");
+    expect(redactSecrets("key ffl_live_SUPERSECRETVALUE")).toContain("ffl_[redacted]");
+    expect(redactSecrets("ffl_test_abc-def-ghi-jkl")).not.toContain("abc-def");
+    expect(redactSecrets("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturevalue")).toContain("[jwt redacted]");
     expect(redactSecrets("Authorization: Bearer ffl_live_SUPERSECRETVALUE")).not.toContain("SUPERSECRETVALUE");
   });
 });

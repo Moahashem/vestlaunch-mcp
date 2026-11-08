@@ -16,7 +16,7 @@
  * imports, so this is a safe home for shared helpers.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
 import { EncryptJWT, jwtDecrypt } from "jose";
@@ -92,6 +92,11 @@ export function resourceUrl(req?: IncomingMessage): string {
 //   - "refresh" long-lived token exchanged at /token for a fresh access token
 
 const CODE_TTL = "10m";
+// One-use authorization codes need a durable nonce store shared by every
+// instance. This deployment has none (the token is a stateless JWE). A
+// process-local set would not survive another instance or a cold start, so
+// it is not used. `jti` is present so a future store can consume it. Until
+// that store exists, a code can be replayed until CODE_TTL.
 const ACCESS_TTL = "1h";
 const REFRESH_TTL = "30d";
 
@@ -145,7 +150,7 @@ async function decrypt<T>(token: string, tt: "code" | "access" | "refresh"): Pro
 
 // Authorization code ────────────────────────────
 export function mintAuthCode(p: AuthCodePayload, req?: IncomingMessage): Promise<string> {
-  return encrypt({ ...p }, "code", CODE_TTL, baseUrl(req));
+  return encrypt({ ...p, jti: randomBytes(16).toString("hex") }, "code", CODE_TTL, baseUrl(req));
 }
 export function readAuthCode(token: string): Promise<AuthCodePayload & { tt: string }> {
   return decrypt<AuthCodePayload & { tt: string }>(token, "code");
@@ -169,18 +174,40 @@ export function readRefreshToken(token: string): Promise<RefreshPayload & { tt: 
 
 // ───────────────────────── PKCE verification ─────────────────────────
 
+const BLOCKED_REDIRECT_SCHEMES = new Set(["javascript", "data", "file", "blob", "vbscript", "about"]);
+
+/**
+ * Accept https, loopback http, and a private-use scheme for a native MCP
+ * client. Reject open redirects, fragments, and URLs that carry credentials.
+ */
+export function validateRedirectUri(uri: string): boolean {
+  if (!uri || uri.length > 2000 || /[\s#\\]/.test(uri)) return false;
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password || url.hash) return false;
+  const scheme = url.protocol.replace(/:$/, "").toLowerCase();
+  if (!scheme || BLOCKED_REDIRECT_SCHEMES.has(scheme)) return false;
+  if (scheme === "https") return url.hostname.length > 0;
+  if (scheme === "http") {
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  }
+  return /^[a-z][a-z0-9+.-]*$/.test(scheme);
+}
+
 /**
  * Verify an RFC 7636 PKCE code_verifier against the stored code_challenge.
- * Supports S256 (required by OAuth 2.1) and plain (fallback if a client ever
- * registers it — Claude uses S256).
+ * S256 only. `plain` is rejected.
  */
 export function verifyPkce(
   verifier: string,
   challenge: string,
   method: string,
 ): boolean {
-  if (!verifier || !challenge) return false;
-  if (method === "plain") return verifier === challenge;
+  if (!verifier || !challenge || method !== "S256") return false;
   // S256: BASE64URL(SHA256(verifier)) === challenge
   const hash = createHash("sha256").update(verifier).digest();
   const computed = Buffer.from(hash)

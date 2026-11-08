@@ -88,6 +88,9 @@ import {
   permitTool,
   redactSecrets,
   ruleFor,
+  scopeGrants,
+  formatAudit,
+  type AuthorityMode,
   type CallerIdentity,
 } from "../src/mcp-authz";
 import {
@@ -196,7 +199,7 @@ async function crmRequest<T = unknown>(
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
-    const text = await res.text();
+    const text = redactSecrets(await res.text());
     let json: unknown = null;
     if (text.length > 0) {
       try {
@@ -267,7 +270,7 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 function hasScope(required: string, available: ReadonlyArray<string>): boolean {
-  return required === "*" || available.includes("*") || available.includes(required);
+  return scopeGrants("read", available, required);
 }
 
 function buildToolDef(
@@ -1833,7 +1836,7 @@ async function ownerBilling(cfg: Cfg, a: Record<string, unknown>): Promise<unkno
 
 const VALID_METHODS: ReadonlyArray<HttpMethod> = ["GET", "POST", "PATCH", "DELETE", "PUT"];
 
-async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Server> {
+async function buildServer(cfg: Cfg, toolFilter: Set<string> | null, mode: AuthorityMode): Promise<Server> {
   const me = await crmRequest<{
     identity?: { scopes?: string[]; name?: string; email?: string };
     capabilities?: ManifestTool[];
@@ -1852,7 +1855,13 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
   const data = me.data ?? {};
   const caps = Array.isArray(data.capabilities) ? data.capabilities : [];
   const scopes = data.identity?.scopes ?? [];
-  const identity = parseCallerIdentity(data.identity);
+  const identity = parseCallerIdentity(data.identity, mode);
+  if (mode === "scoped" && !identity.authorityOk) {
+    const e = new Error(identity.authorityError ?? "Missing CRM authority") as Error & { statusCode?: number; code?: string };
+    e.statusCode = 403;
+    e.code = "authority";
+    throw e;
+  }
   const shown = (toolName: string) =>
     exposeTool(toolName, toolFilter, identity, { enableWrites: cfg.enableWrites });
   const tools = caps.filter(
@@ -2047,9 +2056,14 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
         else rawArgs = confined.args;
       }
     }
+    const record = auditRecord({
+      identity,
+      tool: name,
+      decision: decision.ok ? "allow" : "deny",
+      reason: decision.ok ? "" : decision.reason,
+    });
+    process.stderr.write(`vestlaunch-mcp audit ${formatAudit(record)}\n`);
     if (!decision.ok) {
-      const record = auditRecord({ identity, tool: name, decision: "deny", reason: decision.reason });
-      process.stderr.write(`vestlaunch-mcp audit ${JSON.stringify(record)}\n`);
       return {
         content: [{ type: "text", text: redactSecrets(decision.reason) }],
         isError: true,
@@ -2676,8 +2690,10 @@ export default async function handler(
   const legacyToken = (process.env.MCP_BEARER_TOKEN ?? "").trim();
 
   let perUserApiKey: string | undefined;
+  let authorityMode: AuthorityMode = "scoped";
   if (legacyToken && bearer === legacyToken) {
-    perUserApiKey = undefined; // legacy shared-token mode (env VESTLAUNCH_API_KEY)
+    perUserApiKey = undefined; // explicit legacy shared token. Not a retry after a scoped failure.
+    authorityMode = "legacy-shared";
   } else if (bearer.startsWith(CRM_KEY_PREFIX)) {
     perUserApiKey = bearer; // per-user CRM key; validated by /api/v1/me below
   } else if (bearer) {
@@ -2732,9 +2748,21 @@ export default async function handler(
 
   let server: Server;
   try {
-    server = await buildServer(loadCfg(perUserApiKey), toolFilter);
+    server = await buildServer(loadCfg(perUserApiKey), toolFilter, authorityMode);
   } catch (err) {
-    const status = (err as { statusCode?: number })?.statusCode;
+    const coded = err as { statusCode?: number; code?: string };
+    if (coded.code === "authority") {
+      sendJson(res, 403, {
+        jsonrpc: "2.0",
+        error: {
+          code: -32003,
+          message: redactSecrets(err instanceof Error ? err.message : "Missing CRM authority"),
+        },
+        id: null,
+      });
+      return;
+    }
+    const status = coded.statusCode;
     if (perUserApiKey && (status === 401 || status === 403)) {
       sendJson(res, 401, {
         jsonrpc: "2.0",

@@ -21,6 +21,8 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { validateRedirectUri } from "./_oauth";
+
 export const config = { maxDuration: 10 };
 
 interface RegistrationRequest {
@@ -72,13 +74,13 @@ export default async function handler(
     ? meta.redirect_uris.filter((u): u is string => typeof u === "string")
     : [];
 
-  if (redirectUris.length === 0) {
+  if (redirectUris.length === 0 || redirectUris.some((uri) => !validateRedirectUri(uri))) {
     res.statusCode = 400;
     res.setHeader("content-type", "application/json");
     res.end(
       JSON.stringify({
         error: "invalid_client_metadata",
-        error_description: "redirect_uris is required",
+        error_description: "redirect_uris must be https, loopback http, or a private-use scheme",
       }),
     );
     return;

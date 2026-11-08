@@ -13,7 +13,7 @@
  */
 
 import type { ApiClient, HttpMethod } from "./api-client.js";
-import { confineArguments, isExecutableHiddenAsRead, isForbiddenCapability, parseCallerIdentity } from "./mcp-authz.js";
+import { confineArguments, isExecutableHiddenAsRead, isForbiddenCapability, parseCallerIdentity, scopeGrants } from "./mcp-authz.js";
 import type { ManifestTool } from "./manifest.js";
 import { extractPathParams, substitutePath } from "./manifest.js";
 
@@ -82,7 +82,7 @@ export function buildToolDefinition(
   const isWrite = WRITE_METHODS.includes(tool.method);
   if (isWrite && !opts.enableWrites) return null;
   if (opts.blockAdmin && isAdminTool(tool)) return null;
-  if (!hasScopeFor(tool.scope, opts.availableScopes)) return null;
+  if (!scopeGrants(isWrite ? "write" : "read", opts.availableScopes, tool.scope)) return null;
 
   const writeBanner = isWrite ? "[WRITE] " : "";
   const description =
@@ -171,17 +171,19 @@ export function buildToolDefinition(
   };
 }
 
-function hasScopeFor(required: string, available: ReadonlyArray<string>): boolean {
-  // Wildcard scope handling — the CRM uses "*" to mean "any scope".
-  if (required === "*") return true;
-  if (available.includes("*")) return true;
-  return available.includes(required);
-}
-
 /**
  * Execute a tool against the CRM. Inputs are validated minimally —
  * heavy validation lives server-side in the route handler.
  */
+function asCallIdentity(raw: unknown) {
+  if (raw === undefined) return parseCallerIdentity(undefined, "legacy-shared");
+  if (typeof raw === "object" && raw !== null && "authority" in raw) {
+    const mode = (raw as { authority?: string }).authority === "scoped" ? "scoped" : "legacy-shared";
+    return parseCallerIdentity(raw, mode);
+  }
+  return parseCallerIdentity(raw, "scoped");
+}
+
 export async function executeTool(
   client: ApiClient,
   def: McpToolDefinition,
@@ -189,7 +191,7 @@ export async function executeTool(
   identityRaw?: unknown,
 ): Promise<unknown> {
   const confined = confineArguments(
-    parseCallerIdentity(identityRaw),
+    asCallIdentity(identityRaw),
     rawInput,
     def.meta.flat ? "top" : "query",
   );

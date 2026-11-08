@@ -17,6 +17,7 @@ import { ApiClient } from "./api-client.js";
 import type { Config } from "./config.js";
 import { log } from "./log.js";
 import { loadManifest } from "./manifest.js";
+import { parseCallerIdentity } from "./mcp-authz.js";
 import {
   type McpToolDefinition,
   buildToolDefinition,
@@ -78,10 +79,16 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
   });
 
   const manifest = await loadManifest(client);
+  const authorityMode = process.env.VESTLAUNCH_AUTH_MODE === "scoped" ? "scoped" : "legacy-shared";
+  const caller = parseCallerIdentity(manifest.identity, authorityMode);
+  if (authorityMode === "scoped" && !caller.authorityOk) {
+    throw new Error(caller.authorityError ?? "Missing CRM authority");
+  }
   log.info(`agent identity confirmed`, {
     apiKeyId: manifest.identity.apiKeyId,
     agentName: manifest.identity.agentName ?? manifest.identity.name,
     scopes: manifest.identity.scopes,
+    authority: caller.authority,
     crmContext: manifest.crm,
   });
 
@@ -133,7 +140,7 @@ export async function buildServer(config: Config): Promise<BuiltServer> {
         client,
         def,
         (rawArgs ?? {}) as Record<string, unknown>,
-        manifest.identity,
+        caller,
       );
       return {
         content: [

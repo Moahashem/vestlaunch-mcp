@@ -1,5 +1,7 @@
 # VestLaunch MCP — Sign-In (OAuth) Setup
 
+**The live server does not use WorkOS.** Sign-in is the self-hosted OAuth server in this repo (`/authorize`, `/token`). The connection steps that match the code are in [`MCP-CONNECTION.md`](MCP-CONNECTION.md). The WorkOS notes below are the old plan and are not the setup to follow.
+
 **Plain-language guide for Mo. Last updated 2026-07-14.**
 
 ## The problem we're fixing

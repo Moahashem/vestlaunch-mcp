@@ -23,7 +23,14 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { CRM_KEY_PREFIX, mintAuthCode, validateCrmKey } from "./_oauth";
+import {
+  authorizationCodeFlowReady,
+  authorizationCodeUnavailableReason,
+  CRM_KEY_PREFIX,
+  mintAuthCode,
+  validateCrmKey,
+  validateRedirectUri,
+} from "./_oauth";
 
 export const config = { maxDuration: 30 };
 
@@ -158,10 +165,16 @@ export default async function handler(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
+  if (!authorizationCodeFlowReady()) {
+    const pr = req.method === "GET" ? readParams(url.searchParams) : readParams(new URLSearchParams());
+    sendHtml(res, 403, loginPage(pr, authorizationCodeUnavailableReason()));
+    return;
+  }
+
   // ── GET: render the login form ──
   if (req.method === "GET") {
     const pr = readParams(url.searchParams);
-    if (!pr.redirectUri || pr.responseType !== "code") {
+    if (!pr.redirectUri || !validateRedirectUri(pr.redirectUri) || pr.responseType !== "code") {
       sendHtml(
         res,
         400,
@@ -179,8 +192,16 @@ export default async function handler(
     const pr = readParams(form);
     const crmKey = (form.get("crm_key") ?? "").trim();
 
-    if (!pr.redirectUri) {
-      sendHtml(res, 400, loginPage(pr, "Missing redirect_uri."));
+    if (!pr.redirectUri || !validateRedirectUri(pr.redirectUri)) {
+      sendHtml(res, 400, loginPage(pr, "redirect_uri is missing or not allowed."));
+      return;
+    }
+    if (!pr.clientId) {
+      sendHtml(res, 400, loginPage(pr, "Missing client_id."));
+      return;
+    }
+    if (pr.codeChallengeMethod !== "S256") {
+      sendHtml(res, 400, loginPage(pr, "PKCE must use S256."));
       return;
     }
     if (!pr.codeChallenge) {

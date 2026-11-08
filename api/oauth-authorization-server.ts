@@ -15,7 +15,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { baseUrl } from "./_oauth";
+import { authorizationCodeFlowReady, baseUrl } from "./_oauth";
 
 export const config = { maxDuration: 10 };
 
@@ -39,10 +39,12 @@ export default function handler(req: IncomingMessage, res: ServerResponse): void
     token_endpoint: `${base}/token`,
     registration_endpoint: `${base}/register`,
     // We are a public-client AS: PKCE is required, no client secrets.
-    response_types_supported: ["code"],
+    response_types_supported: authorizationCodeFlowReady() ? ["code"] : [],
     response_modes_supported: ["query"],
-    grant_types_supported: ["authorization_code", "refresh_token"],
-    code_challenge_methods_supported: ["S256", "plain"],
+    grant_types_supported: authorizationCodeFlowReady()
+      ? ["authorization_code", "refresh_token"]
+      : ["refresh_token"],
+    code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
     scopes_supported: ["openid", "profile", "email"],
     // RFC 8707 — we honor a resource indicator if the client sends one.

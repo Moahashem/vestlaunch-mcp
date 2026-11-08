@@ -27,10 +27,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import {
+  authorizationCodeFlowReady,
+  authorizationCodeUnavailableReason,
   mintAccessToken,
   mintRefreshToken,
   readAuthCode,
   readRefreshToken,
+  validateCrmKey,
   verifyPkce,
 } from "./_oauth";
 
@@ -58,6 +61,21 @@ function sendError(
   res.setHeader("cache-control", "no-store");
   res.setHeader("pragma", "no-cache");
   res.end(JSON.stringify({ error, ...(description ? { error_description: description } : {}) }));
+}
+
+/**
+ * A refresh token (and an authorization code) carries the CRM key inside the
+ * JWE. Decrypting it is not enough: the key may have been revoked since it
+ * was wrapped. Fail closed — a CRM outage does not mint a fresh token.
+ * The key itself is never written into the error.
+ */
+async function crmKeyStillValid(crmKey: string): Promise<boolean> {
+  try {
+    const check = await validateCrmKey(crmKey);
+    return check.ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Send a successful token response. */
@@ -109,6 +127,10 @@ export default async function handler(
 
   // ── authorization_code grant ──
   if (grantType === "authorization_code") {
+    if (!authorizationCodeFlowReady()) {
+      sendError(res, 400, "unauthorized_client", authorizationCodeUnavailableReason());
+      return;
+    }
     const code = form.get("code") ?? "";
     const codeVerifier = form.get("code_verifier") ?? "";
     const redirectUri = form.get("redirect_uri") ?? "";
@@ -119,6 +141,11 @@ export default async function handler(
     }
     if (!codeVerifier) {
       sendError(res, 400, "invalid_request", "Missing code_verifier (PKCE).");
+      return;
+    }
+    const clientId = form.get("client_id") ?? "";
+    if (!clientId) {
+      sendError(res, 400, "invalid_request", "Missing client_id.");
       return;
     }
 
@@ -132,14 +159,23 @@ export default async function handler(
 
     // PKCE: the verifier the client now presents must match the challenge
     // that was baked into the code at /authorize.
-    if (!verifyPkce(codeVerifier, payload.codeChallenge, payload.codeChallengeMethod)) {
+    if (payload.codeChallengeMethod !== "S256" || !verifyPkce(codeVerifier, payload.codeChallenge, payload.codeChallengeMethod)) {
       sendError(res, 400, "invalid_grant", "PKCE verification failed.");
       return;
     }
+    if (!payload.clientId || clientId !== payload.clientId) {
+      sendError(res, 400, "invalid_grant", "client_id does not match the authorization request.");
+      return;
+    }
 
-    // The redirect_uri, if sent, must match the one baked into the code.
-    if (redirectUri && redirectUri !== payload.redirectUri) {
+    // redirect_uri is required and must be the one baked into the code.
+    if (!redirectUri || redirectUri !== payload.redirectUri) {
       sendError(res, 400, "invalid_grant", "redirect_uri does not match the authorization request.");
+      return;
+    }
+
+    if (!(await crmKeyStillValid(payload.crmKey))) {
+      sendError(res, 400, "invalid_grant", "This sign-in is no longer valid. Reconnect.");
       return;
     }
 
@@ -162,6 +198,11 @@ export default async function handler(
       sendError(res, 400, "invalid_request", "Missing refresh_token.");
       return;
     }
+    const clientId = form.get("client_id") ?? "";
+    if (!clientId) {
+      sendError(res, 400, "invalid_request", "Missing client_id.");
+      return;
+    }
 
     let payload;
     try {
@@ -171,11 +212,20 @@ export default async function handler(
       return;
     }
 
+    if (!payload.clientId || clientId !== payload.clientId) {
+      sendError(res, 400, "invalid_grant", "client_id does not match this refresh token.");
+      return;
+    }
+    if (!(await crmKeyStillValid(payload.crmKey))) {
+      sendError(res, 400, "invalid_grant", "This sign-in is no longer valid. Reconnect.");
+      return;
+    }
+
     const accessToken = await mintAccessToken(
       { crmKey: payload.crmKey, clientId: payload.clientId, scope: payload.scope },
       req,
     );
-    // Rotate the refresh token.
+    // Rotate the refresh token. The new token stays bound to the same client_id.
     const refreshToken = await mintRefreshToken(
       { crmKey: payload.crmKey, clientId: payload.clientId, scope: payload.scope },
       req,

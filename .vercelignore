@@ -1,7 +1,9 @@
 # Keep Vercel from seeing the stdio MCP entry points so it does NOT
-# auto-detect a Node "root entrypoint" (src/index.ts / dist/index.js) and
-# instead deploys the self-contained /api serverless functions.
-# The stdio MCP (src/*, dist/*) is unaffected for local/npm clients.
-src
+# auto-detect a Node "root entrypoint" (src/index.ts / dist/index.js).
+# server.ts imports api/mcp.ts, which imports src/mcp-authz.ts. That one
+# file has to be uploaded or the preview build fails with UNRESOLVED_IMPORT.
+# A bare "src" ignore would hide it again; un-ignore the file after src/*.
+src/*
+!src/mcp-authz.ts
 dist
 tsconfig.json

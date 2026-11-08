@@ -13,6 +13,7 @@
  */
 
 import type { ApiClient, HttpMethod } from "./api-client.js";
+import { confineArguments, isExecutableHiddenAsRead, isForbiddenCapability, parseCallerIdentity, scopeGrants } from "./mcp-authz.js";
 import type { ManifestTool } from "./manifest.js";
 import { extractPathParams, substitutePath } from "./manifest.js";
 
@@ -77,10 +78,11 @@ export function buildToolDefinition(
   tool: ManifestTool,
   opts: BuildOptions,
 ): McpToolDefinition | null {
+  if (isForbiddenCapability(tool) || isExecutableHiddenAsRead(tool)) return null;
   const isWrite = WRITE_METHODS.includes(tool.method);
   if (isWrite && !opts.enableWrites) return null;
   if (opts.blockAdmin && isAdminTool(tool)) return null;
-  if (!hasScopeFor(tool.scope, opts.availableScopes)) return null;
+  if (!scopeGrants(isWrite ? "write" : "read", opts.availableScopes, tool.scope)) return null;
 
   const writeBanner = isWrite ? "[WRITE] " : "";
   const description =
@@ -169,22 +171,32 @@ export function buildToolDefinition(
   };
 }
 
-function hasScopeFor(required: string, available: ReadonlyArray<string>): boolean {
-  // Wildcard scope handling — the CRM uses "*" to mean "any scope".
-  if (required === "*") return true;
-  if (available.includes("*")) return true;
-  return available.includes(required);
-}
-
 /**
  * Execute a tool against the CRM. Inputs are validated minimally —
  * heavy validation lives server-side in the route handler.
  */
+function asCallIdentity(raw: unknown) {
+  if (raw === undefined) return parseCallerIdentity(undefined, "legacy-shared");
+  if (typeof raw === "object" && raw !== null && "authority" in raw) {
+    const mode = (raw as { authority?: string }).authority === "scoped" ? "scoped" : "legacy-shared";
+    return parseCallerIdentity(raw, mode);
+  }
+  return parseCallerIdentity(raw, "scoped");
+}
+
 export async function executeTool(
   client: ApiClient,
   def: McpToolDefinition,
   rawInput: Record<string, unknown>,
+  identityRaw?: unknown,
 ): Promise<unknown> {
+  const confined = confineArguments(
+    asCallIdentity(identityRaw),
+    rawInput,
+    def.meta.flat ? "top" : "query",
+  );
+  if (!confined.ok) throw new Error(confined.reason);
+  rawInput = confined.args;
   const pathParams = extractPathParams(def.meta.pathTemplate);
   const paramValues: Record<string, string> = {};
   for (const param of pathParams) {

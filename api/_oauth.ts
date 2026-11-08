@@ -16,7 +16,7 @@
  * imports, so this is a safe home for shared helpers.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
 import { EncryptJWT, jwtDecrypt } from "jose";
@@ -92,6 +92,27 @@ export function resourceUrl(req?: IncomingMessage): string {
 //   - "refresh" long-lived token exchanged at /token for a fresh access token
 
 const CODE_TTL = "10m";
+
+/**
+ * Authorization-code sign-in is off until a durable store can consume each
+ * code exactly once across every instance. This repo has no such store
+ * (no database, no KV). Process memory is not accepted. The static CRM API
+ * key Bearer on /api/mcp is the supported connection. Refresh of a token
+ * that was already issued is a different grant and is unchanged.
+ */
+export function authorizationCodeFlowReady(): boolean {
+  const requested = (process.env.OAUTH_CODE_STORE ?? "").trim().toLowerCase();
+  if (requested === "memory" || requested === "local" || requested === "process") return false;
+  return false;
+}
+
+export function authorizationCodeUnavailableReason(): string {
+  const requested = (process.env.OAUTH_CODE_STORE ?? "").trim().toLowerCase();
+  if (requested === "memory" || requested === "local" || requested === "process") {
+    return "Authorization-code sign-in is disabled. In-memory code consumption is not durable and is not accepted. Use Authorization: Bearer with the agent's CRM API key.";
+  }
+  return "Authorization-code sign-in is disabled. No durable one-use store is configured. Use Authorization: Bearer with the agent's CRM API key.";
+}
 const ACCESS_TTL = "1h";
 const REFRESH_TTL = "30d";
 
@@ -145,7 +166,7 @@ async function decrypt<T>(token: string, tt: "code" | "access" | "refresh"): Pro
 
 // Authorization code ────────────────────────────
 export function mintAuthCode(p: AuthCodePayload, req?: IncomingMessage): Promise<string> {
-  return encrypt({ ...p }, "code", CODE_TTL, baseUrl(req));
+  return encrypt({ ...p, jti: randomBytes(16).toString("hex") }, "code", CODE_TTL, baseUrl(req));
 }
 export function readAuthCode(token: string): Promise<AuthCodePayload & { tt: string }> {
   return decrypt<AuthCodePayload & { tt: string }>(token, "code");
@@ -169,18 +190,40 @@ export function readRefreshToken(token: string): Promise<RefreshPayload & { tt: 
 
 // ───────────────────────── PKCE verification ─────────────────────────
 
+const BLOCKED_REDIRECT_SCHEMES = new Set(["javascript", "data", "file", "blob", "vbscript", "about"]);
+
+/**
+ * Accept https, loopback http, and a private-use scheme for a native MCP
+ * client. Reject open redirects, fragments, and URLs that carry credentials.
+ */
+export function validateRedirectUri(uri: string): boolean {
+  if (!uri || uri.length > 2000 || /[\s#\\]/.test(uri)) return false;
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password || url.hash) return false;
+  const scheme = url.protocol.replace(/:$/, "").toLowerCase();
+  if (!scheme || BLOCKED_REDIRECT_SCHEMES.has(scheme)) return false;
+  if (scheme === "https") return url.hostname.length > 0;
+  if (scheme === "http") {
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  }
+  return /^[a-z][a-z0-9+.-]*$/.test(scheme);
+}
+
 /**
  * Verify an RFC 7636 PKCE code_verifier against the stored code_challenge.
- * Supports S256 (required by OAuth 2.1) and plain (fallback if a client ever
- * registers it — Claude uses S256).
+ * S256 only. `plain` is rejected.
  */
 export function verifyPkce(
   verifier: string,
   challenge: string,
   method: string,
 ): boolean {
-  if (!verifier || !challenge) return false;
-  if (method === "plain") return verifier === challenge;
+  if (!verifier || !challenge || method !== "S256") return false;
   // S256: BASE64URL(SHA256(verifier)) === challenge
   const hash = createHash("sha256").update(verifier).digest();
   const computed = Buffer.from(hash)

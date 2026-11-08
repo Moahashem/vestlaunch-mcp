@@ -63,27 +63,17 @@ claude mcp add vestlaunch -- env VESTLAUNCH_BASE_URL=https://crm.vestlaunch.com 
 
 Spawn `npx -y vestlaunch-mcp` with `VESTLAUNCH_BASE_URL` and `VESTLAUNCH_API_KEY` in the environment. Stdio in, stdio out.
 
-#### Hosted (no install) — sign in from Claude Desktop / Cowork *(recommended)*
+#### Hosted (no install)
 
-Add the Vercel deployment as a **custom connector** and click **Connect**. A WorkOS login page opens, you sign in with your work email and approve access, and Claude gets its token automatically — nothing to copy or paste:
-
-```
-URL:    https://<your-app>.vercel.app/api/mcp
-Auth:   click "Connect" → sign in with WorkOS → Allow
-```
-
-Under the hood this is a standard OAuth 2.1 sign-in: WorkOS AuthKit runs the login and consent screen and issues the token, and this server verifies it and maps your signed-in email to your own CRM key. Owner setup (WorkOS account + Vercel env vars) is a one-time job documented in [`docs/OAUTH-SETUP.md`](docs/OAUTH-SETUP.md). If you sign in successfully but see "no CRM access is provisioned," ask the VestLaunch owner to add your email to the access list.
-
-#### Hosted (no install) — connect over HTTP with your own key
-
-For agents/CLIs that *can* paste a token, connect to the same endpoint with **your own CRM API key as the Bearer token** — no local install, no env vars:
+The remote endpoint, transport, and auth modes are documented in [`docs/MCP-CONNECTION.md`](docs/MCP-CONNECTION.md). Short form:
 
 ```
-URL:    https://<your-app>.vercel.app/api/mcp
-Auth:   Bearer ffl_live_...   (your key from Settings → API Keys)
+URL:    https://vestlaunch-mcp.vercel.app/api/mcp
+Auth:   Authorization: Bearer <that agent's own CRM key>
+        Authorization-code Connect is disabled until codes can be consumed once.
 ```
 
-Either way you only see the tools your key's scopes allow; writes are governed by those scopes (DELETE is never exposed, and campaign blasts always require a test send + confirmation code, enforced by the CRM). Revoking the key in the CRM cuts off access instantly. A legacy shared `MCP_BEARER_TOKEN` is still accepted for previously configured agents and behaves as before (env `VESTLAUNCH_API_KEY`, writes off unless `VESTLAUNCH_ENABLE_WRITES=true`).
+A per-agent key is refused until `/api/v1/me` returns `business` (`ffl`, `cranbrook`, or `both`) and `workspaceIds`. The shared `MCP_BEARER_TOKEN` path is the explicit legacy exception and is not a fallback when a scoped key fails. A read scope does not authorize a send, a payment, or a write. `?tools=` can only hide tools. Revoking the key in the CRM cuts off access, including token refresh. Manifest writes on the legacy path stay off unless `VESTLAUNCH_ENABLE_WRITES=true`.
 
 ### 3. Try it
 

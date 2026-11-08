@@ -85,6 +85,8 @@ Auth:   Bearer ffl_live_...   (your key from Settings → API Keys)
 
 Either way you only see the tools your key's scopes allow; writes are governed by those scopes (DELETE is never exposed, and campaign blasts always require a test send + confirmation code, enforced by the CRM). Revoking the key in the CRM cuts off access instantly. A legacy shared `MCP_BEARER_TOKEN` is still accepted for previously configured agents and behaves as before (env `VESTLAUNCH_API_KEY`, writes off unless `VESTLAUNCH_ENABLE_WRITES=true`).
 
+A new bot key is different only when the CRM sets `mcpProfile` to `onboarding`. That key is refused here and connects at `/api/mcp-onboarding`, which serves the metadata self-check and no data routes. The contract is in [`docs/MCP-ONBOARDING.md`](docs/MCP-ONBOARDING.md). Keys that omit the field, including current OAuth grants, stay on `/api/mcp`.
+
 ### 3. Try it
 
 In your agent, ask:

@@ -77,6 +77,7 @@ import {
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import { readAccessToken } from "./_oauth";
+import { legacySurfaceDecision } from "./_mcp-onboarding-policy";
 import { reportWorkComplete, WORK_COMPLETE_PREFIX } from "./workforce-hub";
 import {
   APPFOLIO_ENTRY_TOOLS,
@@ -1852,6 +1853,13 @@ async function buildServer(cfg: Cfg, toolFilter: Set<string> | null): Promise<Se
     throw e;
   }
   const data = me.data ?? {};
+  const surface = legacySurfaceDecision(data.identity);
+  if (!surface.ok) {
+    const blocked = new Error(surface.reason) as Error & { statusCode?: number; code?: string };
+    blocked.statusCode = 403;
+    blocked.code = "onboarding_profile";
+    throw blocked;
+  }
   const caps = Array.isArray(data.capabilities) ? data.capabilities : [];
   const scopes = data.identity?.scopes ?? [];
   const tools = caps.filter(
@@ -2698,7 +2706,16 @@ export default async function handler(
   try {
     server = await buildServer(loadCfg(perUserApiKey), toolFilter);
   } catch (err) {
-    const status = (err as { statusCode?: number })?.statusCode;
+    const coded = err as { statusCode?: number; code?: string };
+    if (coded.code === "onboarding_profile") {
+      sendJson(res, 403, {
+        jsonrpc: "2.0",
+        error: { code: -32003, message: err instanceof Error ? err.message : "This key cannot use /api/mcp." },
+        id: null,
+      });
+      return;
+    }
+    const status = coded.statusCode;
     if (perUserApiKey && (status === 401 || status === 403)) {
       sendJson(res, 401, {
         jsonrpc: "2.0",

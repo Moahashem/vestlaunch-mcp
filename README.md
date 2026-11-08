@@ -70,7 +70,7 @@ The remote endpoint, transport, and auth modes are documented in [`docs/MCP-CONN
 ```
 URL:    https://vestlaunch-mcp.vercel.app/api/mcp
 Auth:   Authorization: Bearer <that agent's own CRM key>
-        or OAuth against this same host (Connect → /authorize)
+        Authorization-code Connect is disabled until codes can be consumed once.
 ```
 
 A per-agent key is refused until `/api/v1/me` returns `business` (`ffl`, `cranbrook`, or `both`) and `workspaceIds`. The shared `MCP_BEARER_TOKEN` path is the explicit legacy exception and is not a fallback when a scoped key fails. A read scope does not authorize a send, a payment, or a write. `?tools=` can only hide tools. Revoking the key in the CRM cuts off access, including token refresh. Manifest writes on the legacy path stay off unless `VESTLAUNCH_ENABLE_WRITES=true`.

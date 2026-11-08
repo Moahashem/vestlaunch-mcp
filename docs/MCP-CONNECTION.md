@@ -36,11 +36,9 @@ Three ways, in this order. None of them is a shared password for every agent.
 
 1. **Legacy shared bearer** (`MCP_BEARER_TOKEN`). Kept so existing agents keep working. Uses the deployment's `VESTLAUNCH_API_KEY`. Manifest writes stay off unless `VESTLAUNCH_ENABLE_WRITES=true`. Do not put a new agent on this token.
 2. **Scoped CRM key** as `Authorization: Bearer ffl_live_...`. This is the path for a new agent, including Grok. The server calls `GET /api/v1/me` with that key only. If the identity does not match the contract below, the connection is **403** and the server does **not** retry with `VESTLAUNCH_API_KEY`. A 401 or 403 from the CRM itself is "invalid or revoked". The key text is not returned.
-3. **OAuth access token** from this host. Same scoped contract as a CRM key, after the token is unwrapped. PKCE is S256 only. `redirect_uri` must be https, loopback http, or a private-use scheme, with no userinfo and no fragment, and it must match exactly at `/token`. `client_id` on the code exchange and on refresh must match the id baked into the token. Access tokens expire in 1 hour. Refresh tokens expire in 30 days and are re-checked against `/api/v1/me` before a new access token is minted. If the CRM is down, refresh fails closed.
+3. **OAuth authorization-code sign-in is disabled.** `/authorize` returns 403 and `POST /token` with `grant_type=authorization_code` returns `unauthorized_client`. Discovery advertises `refresh_token` only. This deployment has no database or KV that can consume a code once across instances, and process memory is not used. Setting `OAUTH_CODE_STORE=memory` does not turn the flow on. The supported connection is the static CRM API key Bearer in (2). A refresh token that was already issued can still be exchanged; that grant is not an authorization code. It is re-checked against the CRM and stays bound to `client_id`.
 
 WorkOS is not the live login path. It runs only if `WORKOS_AUTHKIT_DOMAIN` is set. A failed scoped key is not sent there and is not retried as the shared token.
-
-**One-use authorization codes are not enforced.** The code is a stateless JWE (`jti` included). Remembering spent codes in this process's memory would not hold across Vercel instances. One-use needs a durable nonce store shared by every instance. Until that exists, a code can be presented again until its 10-minute expiry.
 
 ## What the server allows
 
@@ -51,7 +49,7 @@ Tools come from `GET /api/v1/me` `capabilities[]`, plus the synthetic tools regi
 - `?tools=` on the URL can hide tools. It cannot reveal one the key lacks.
 - There is no SQL tool, no remote-code tool, and no tool that reads browser cookies. A manifest entry whose name or path is one of those is not registered. A GET whose name or path is a send or payment is not registered; the POST form stays, behind its write scope.
 - A **scoped** key whose identity is missing, malformed, or contradictory is refused before any tool runs. A display name or slug is not a business.
-- Caller fields `business`, `businessId`, `tenant`, `tenantId`, `workspace`, `workspaceId`, and the same names with `_`, `-`, or different case, at any depth up to 6, cannot select a business. A value of `ffl` or `cranbrook` is an alias, not a workspace id. Nesting past that budget rejects the call. One declared workspace is pinned when the caller omits it. Two declared workspaces require the caller to pass exactly one of those ids.
+- `business`, `businessId`, `tenant`, and `tenantId` cannot select a business. `workspaceId` (any case, underscore, or hyphen) is kept only when it exactly matches one id in `identity.workspaceIds`. `ffl` is not a workspace id. With no list, that filter is denied because there is nothing authoritative to match. Nesting past depth 6 rejects the call. One declared id is pinned when omitted. Two require the caller to name exactly one of them.
 - Deletes stay on `VESTLAUNCH_DELETE_ALLOWLIST` (default `delete_contact`).
 
 ### Required `data.identity` for a scoped key
@@ -72,12 +70,12 @@ Tools come from `GET /api/v1/me` `capabilities[]`, plus the synthetic tools regi
 
 ### Legacy shared token
 
-`authority: "legacy-shared"` is only the `MCP_BEARER_TOKEN` match, and the local stdio process unless `VESTLAUNCH_AUTH_MODE=scoped`. It does not fail closed when `business` is absent, and it still lists both companies' synthetic tools when the scopes allow them. It does reject caller business and workspace selectors. Audit lines include `authority` so this is not the same as a scoped key. Do not move a new agent onto this token to avoid the 403.
+`authority: "legacy-shared"` is only the `MCP_BEARER_TOKEN` match, and the local stdio process unless `VESTLAUNCH_AUTH_MODE=scoped`. It does not fail closed when `business` is absent, and it still lists both companies' synthetic tools when the scopes allow them. It rejects business and tenant selectors. A workspace id is kept only when it exactly matches `workspaceIds` on that token's identity. Audit lines include `authority` so this is not the same as a scoped key. Do not move a new agent onto this token to avoid the 403.
 
 ### Migration risks
 
 - A per-user key or OAuth session whose `/api/v1/me` lacks the shape above gets 403 after this deploy. Agents that use those keys stop until the CRM sends the shape. The shared bearer is not a fallback.
-- Callers that passed `workspaceId`, `businessId`, or `tenant` — including a filter that used to work — are denied on every path, including legacy and stdio.
+- `businessId` and `tenant` are denied everywhere. A `workspaceId` that exactly matches a declared workspace id is kept for legacy and stdio as well as scoped keys. Until `/api/v1/me` sends `workspaceIds`, those clients have no id to match, so a workspace filter is denied and the call works only if the filter is omitted. The event-type tools in `src/manifest.ts` document an optional `workspaceId`; omitting it is the path that still runs. No test or doc in this repo shows a production client that must send one.
 - A manifest tool published with scope `*` is visible only to keys that hold `*`.
 - Refresh requests must send the same `client_id` the code was minted for. A client that omitted `client_id` must reconnect.
 - Stdio stays `legacy-shared` until `VESTLAUNCH_AUTH_MODE=scoped`. Setting that before the CRM shape exists makes the local process refuse to start.
@@ -126,7 +124,16 @@ Scoped connections stay closed until `ffl-crm` `GET /api/v1/me` returns `data.id
 
 Path record ids (a contact id, a conversation id) are not decided here. The CRM has to guarantee that a key cannot read or write another business's record by id. That enforcement is separate CRM work. This server will not grow a second copy of it.
 
-One-use OAuth codes need a durable nonce store. This server does not have one and does not pretend a process-local set is one.
+Authorization-code sign-in stays off until a durable nonce store exists. This repo does not add one. Do not set `OAUTH_CODE_STORE=memory`.
+
+## Rollout
+
+1. CRM returns the identity shape below and enforces record ids against that key's business. This MCP does not deploy that.
+2. Review this MCP. The supported client path is `Authorization: Bearer` with the agent's own CRM key. Do not turn on authorization-code sign-in in the same release.
+3. Deploy this MCP only after that review. Scoped keys 403 until step 1 is live. Legacy bearer and default stdio keep running, and a workspace filter works only as an exact match once step 1 includes `workspaceIds`.
+4. A later change may enable authorization codes only together with an atomic consume on a store this deployment already has. That is not this commit.
+
+Real clients not exercised here: Claude Desktop Connect (it will get 403 on `/authorize`), any hosted per-user key, any stdio process that sends `workspaceId`, and the live Ruckus routes. No production credential was used.
 
 ## Deploy and rollback
 

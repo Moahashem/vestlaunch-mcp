@@ -27,6 +27,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import {
+  authorizationCodeFlowReady,
+  authorizationCodeUnavailableReason,
   mintAccessToken,
   mintRefreshToken,
   readAuthCode,
@@ -125,6 +127,10 @@ export default async function handler(
 
   // ── authorization_code grant ──
   if (grantType === "authorization_code") {
+    if (!authorizationCodeFlowReady()) {
+      sendError(res, 400, "unauthorized_client", authorizationCodeUnavailableReason());
+      return;
+    }
     const code = form.get("code") ?? "";
     const codeVerifier = form.get("code_verifier") ?? "";
     const redirectUri = form.get("redirect_uri") ?? "";

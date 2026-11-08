@@ -23,7 +23,14 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { CRM_KEY_PREFIX, mintAuthCode, validateCrmKey, validateRedirectUri } from "./_oauth";
+import {
+  authorizationCodeFlowReady,
+  authorizationCodeUnavailableReason,
+  CRM_KEY_PREFIX,
+  mintAuthCode,
+  validateCrmKey,
+  validateRedirectUri,
+} from "./_oauth";
 
 export const config = { maxDuration: 30 };
 
@@ -157,6 +164,12 @@ export default async function handler(
   res: ServerResponse,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
+
+  if (!authorizationCodeFlowReady()) {
+    const pr = req.method === "GET" ? readParams(url.searchParams) : readParams(new URLSearchParams());
+    sendHtml(res, 403, loginPage(pr, authorizationCodeUnavailableReason()));
+    return;
+  }
 
   // ── GET: render the login form ──
   if (req.method === "GET") {

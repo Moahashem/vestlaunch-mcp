@@ -58,6 +58,46 @@ describe("refresh client binding", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not exchange an authorization code while no durable store exists", async () => {
+    process.env.OAUTH_CODE_STORE = "memory";
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { mintAuthCode } = await import("../../api/_oauth.js");
+    const { default: handler } = await import("../../api/token.js");
+    const code = await mintAuthCode({
+      crmKey: KEY,
+      clientId: "client-a",
+      redirectUri: "http://127.0.0.1:9/callback",
+      codeChallenge: "challenge",
+      codeChallengeMethod: "S256",
+    });
+    const res = resCapture();
+    await handler(
+      formReq(new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        code_verifier: "verifier",
+        client_id: "client-a",
+        redirect_uri: "http://127.0.0.1:9/callback",
+      })),
+      res as unknown as ServerResponse,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toContain("disabled");
+    expect(res.body).not.toContain("access_token");
+    expect(res.body).not.toContain("SUPERSECRETVALUE");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("advertises refresh only while authorization codes are disabled", async () => {
+    const { default: metadata } = await import("../../api/oauth-authorization-server.js");
+    const res = resCapture();
+    metadata({ method: "GET", headers: {}, url: "/.well-known/oauth-authorization-server" } as IncomingMessage, res as unknown as ServerResponse);
+    const body = JSON.parse(res.body) as { grant_types_supported: string[]; response_types_supported: string[] };
+    expect(body.grant_types_supported).toEqual(["refresh_token"]);
+    expect(body.response_types_supported).toEqual([]);
+  });
+
   it("rejects a refresh presented by a different client and does not echo the key", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
     const { mintRefreshToken } = await import("../../api/_oauth.js");

@@ -155,6 +155,16 @@ describe("workspace and pagination", () => {
       "query",
     );
     expect(legacy.ok).toBe(false);
+    const listed = id({
+      authority: "legacy-shared",
+      authorityOk: true,
+      scopes: ["contacts:read"],
+      workspaceIds: ["ws_legacy"],
+    });
+    const kept = confineArguments(listed, { query: { workspaceId: "ws_legacy", offset: 2 } }, "query");
+    expect(kept.ok).toBe(true);
+    if (kept.ok) expect((kept.args.query as { workspaceId: string }).workspaceId).toBe("ws_legacy");
+    expect(confineArguments(listed, { query: { workspaceId: "ws_other", offset: 2 } }, "query").ok).toBe(false);
   });
 
   it("refuses a business alias and a cleared filter", () => {

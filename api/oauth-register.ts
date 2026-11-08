@@ -21,7 +21,7 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { validateRedirectUri } from "./_oauth";
+import { authorizationCodeFlowReady, validateRedirectUri } from "./_oauth";
 
 export const config = { maxDuration: 10 };
 
@@ -96,10 +96,11 @@ export default async function handler(
     client_id_issued_at: issuedAt,
     redirect_uris: redirectUris,
     token_endpoint_auth_method: "none",
-    grant_types:
-      Array.isArray(meta.grant_types) && meta.grant_types.length > 0
+    grant_types: authorizationCodeFlowReady()
+      ? Array.isArray(meta.grant_types) && meta.grant_types.length > 0
         ? meta.grant_types
-        : ["authorization_code", "refresh_token"],
+        : ["authorization_code", "refresh_token"]
+      : ["refresh_token"],
     response_types:
       Array.isArray(meta.response_types) && meta.response_types.length > 0
         ? meta.response_types

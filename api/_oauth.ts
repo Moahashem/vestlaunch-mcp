@@ -92,11 +92,27 @@ export function resourceUrl(req?: IncomingMessage): string {
 //   - "refresh" long-lived token exchanged at /token for a fresh access token
 
 const CODE_TTL = "10m";
-// One-use authorization codes need a durable nonce store shared by every
-// instance. This deployment has none (the token is a stateless JWE). A
-// process-local set would not survive another instance or a cold start, so
-// it is not used. `jti` is present so a future store can consume it. Until
-// that store exists, a code can be replayed until CODE_TTL.
+
+/**
+ * Authorization-code sign-in is off until a durable store can consume each
+ * code exactly once across every instance. This repo has no such store
+ * (no database, no KV). Process memory is not accepted. The static CRM API
+ * key Bearer on /api/mcp is the supported connection. Refresh of a token
+ * that was already issued is a different grant and is unchanged.
+ */
+export function authorizationCodeFlowReady(): boolean {
+  const requested = (process.env.OAUTH_CODE_STORE ?? "").trim().toLowerCase();
+  if (requested === "memory" || requested === "local" || requested === "process") return false;
+  return false;
+}
+
+export function authorizationCodeUnavailableReason(): string {
+  const requested = (process.env.OAUTH_CODE_STORE ?? "").trim().toLowerCase();
+  if (requested === "memory" || requested === "local" || requested === "process") {
+    return "Authorization-code sign-in is disabled. In-memory code consumption is not durable and is not accepted. Use Authorization: Bearer with the agent's CRM API key.";
+  }
+  return "Authorization-code sign-in is disabled. No durable one-use store is configured. Use Authorization: Bearer with the agent's CRM API key.";
+}
 const ACCESS_TTL = "1h";
 const REFRESH_TTL = "30d";
 

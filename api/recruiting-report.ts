@@ -16,6 +16,7 @@
  * (the 2026-08-17 lesson). Small file, small diff, byte-verifiable.
  */
 
+import { postDailyRecruitingReceipt } from "./recruiting-company-receipt";
 import {
   reportRecruitingRun,
   getTodaySendReceipts,
@@ -248,8 +249,18 @@ export async function reportRecruitingRunWithRc(args: {
     );
   }
 
+  let companyReceipt: { posted: boolean; status?: number; skipped?: string } = { posted: false, skipped: "unconfigured" };
+  try {
+    companyReceipt = await postDailyRecruitingReceipt({ status, needsHuman: args.needsHuman });
+  } catch {
+    companyReceipt = { posted: false, skipped: "failed" };
+  }
+
   return {
     ...base,
+    company_receipt_posted: companyReceipt.posted,
+    ...(companyReceipt.skipped ? { company_receipt_skipped: companyReceipt.skipped } : {}),
+    ...(companyReceipt.status === undefined ? {} : { company_receipt_status: companyReceipt.status }),
     rc_posted: rc.posted,
     report_body_source: bodySource,
     ...(receiptTotal === undefined ? {} : { receipts_counted: receiptTotal }),

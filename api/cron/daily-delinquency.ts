@@ -31,6 +31,19 @@ export const config = { maxDuration: 60 };
 
 const AGENT_KEY = "delinquency";
 
+/** Legacy summaries are not delivery evidence: some were written on refused posts. */
+export function hasConfirmedBriefDelivery(row: { status?: string; payload?: unknown }, date: string): boolean {
+  if (row.status !== "ok" || !row.payload || typeof row.payload !== "object") return false;
+  const payload = row.payload as Record<string, unknown>;
+  if (payload.kind !== "delinquency-morning-brief" || payload.date !== date || payload.version !== 1) return false;
+  const delivery = payload.delivery as Record<string, unknown> | null;
+  return !!delivery && typeof delivery === "object" && delivery.posted === true &&
+    delivery.confirmation === "ruckus-send-response" && typeof delivery.confirmedAt === "string" &&
+    Number.isFinite(Date.parse(delivery.confirmedAt)) &&
+    new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" })
+      .format(new Date(delivery.confirmedAt)) === date && Date.parse(delivery.confirmedAt) <= Date.now();
+}
+
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
@@ -64,8 +77,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   // Retry slot already covered by a successful post today → stand down.
   // One successful post is the whole job → any later slot today stands down.
-  const alreadyPosted = (row: { summary?: string }) => typeof row.summary === "string" && row.summary.includes("posted to Ruckus");
-  if (!dateParam && !dry && (await shouldSkipRedundantKickoff(AGENT_KEY, { completionPredicate: alreadyPosted }))) {
+  if (!dateParam && !dry && (await shouldSkipRedundantKickoff(AGENT_KEY, {
+    completionPredicate: row => hasConfirmedBriefDelivery(row, date), completionPredicateOnly: true,
+  }))) {
     json(res, 200, { ok: true, skipped: "spend guard: already posted today" });
     return;
   }
@@ -88,7 +102,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const msg = err instanceof Error ? err.message : String(err);
     const failText = formatFailure(date, msg.slice(0, 160));
     const posted = dry ? { posted: false, error: "dry run" } : await postToRuckusChannel(failText);
-    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `delinquency brief ${date}: ${msg.slice(0, 200)}`, needsHuman: true, durationMs: Date.now() - started, errorMessage: msg });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `delinquency brief ${date}: ${msg.slice(0, 200)}`, needsHuman: true, durationMs: Date.now() - started, errorMessage: msg,
+      payload: { version: 1, kind: "delinquency-failure-notice", date, report: failText, delivery: posted } });
     json(res, 502, { ok: false, date, error: msg, failure_posted: posted.posted, post_error: posted.error });
     return;
   }
@@ -100,10 +115,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   const posted = await postToRuckusChannel(brief);
   if (!posted.posted) {
-    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `delinquency brief ${date}: computed but RingCentral post failed (${posted.error})`, needsHuman: true, durationMs: Date.now() - started });
+    await logAgentRun({ agentKey: AGENT_KEY, status: "failed", summary: `delinquency brief ${date}: computed but RingCentral post unconfirmed (${posted.error})`, needsHuman: true, durationMs: Date.now() - started,
+      errorMessage: posted.error, payload: { version: 1, kind: "delinquency-morning-brief", date, report: brief, delivery: { posted: false, error: posted.error } } });
     json(res, 502, { ok: false, date, error: `post failed: ${posted.error}`, brief });
     return;
   }
-  await logAgentRun({ agentKey: AGENT_KEY, status: "ok", summary: `delinquency brief ${date} posted to Ruckus (${late} past grace)`, durationMs: Date.now() - started });
+  await logAgentRun({ agentKey: AGENT_KEY, status: "ok", summary: `delinquency brief ${date}: Ruckus endpoint confirmed posting (${late} past grace)`, durationMs: Date.now() - started,
+    payload: { version: 1, kind: "delinquency-morning-brief", date, report: brief, delivery: { posted: true, ...posted.delivery },
+      evidenceLimit: "Ruckus send endpoint acknowledgment; not independent provider delivery or staff-read confirmation." } });
   json(res, 200, { ok: true, date, posted: true, past_grace: late, brief });
 }

@@ -47,7 +47,11 @@ function chicagoDateStamp(d: Date = new Date()): string {
  * Workforce run-status write must survive an RC outage, so failures are
  * returned to the caller, not raised.
  */
-export async function postToRuckusChannel(text: string): Promise<{ posted: boolean; error?: string }> {
+export async function postToRuckusChannel(text: string): Promise<{
+  posted: boolean;
+  error?: string;
+  delivery?: { confirmation: "ruckus-send-response"; confirmedAt: string; chatId?: string };
+}> {
   const token = env("RUCKUS_SEND_TOKEN");
   if (!token) return { posted: false, error: "RUCKUS_SEND_TOKEN not set" };
   const body = text.trim();
@@ -62,7 +66,31 @@ export async function postToRuckusChannel(text: string): Promise<{ posted: boole
       const out = (await res.text()).slice(0, 300);
       return { posted: false, error: `HTTP ${res.status}: ${out}` };
     }
-    return { posted: true };
+    // HTTP 200 also covers disabled/held sends; only confirmed delivery counts.
+    let reply: unknown;
+    try {
+      reply = await res.json();
+    } catch {
+      return { posted: false, error: "Ruckus delivery unconfirmed: response was not readable JSON" };
+    }
+    if (!reply || typeof reply !== "object" || Array.isArray(reply)) {
+      return { posted: false, error: "Ruckus delivery unconfirmed: invalid response object" };
+    }
+    const result = reply as Record<string, unknown>;
+    const nothingPosted = result.posted === false || result.sent === false ||
+      (typeof result.note === "string" && /\b(?:nothing (?:was )?posted|not (?:posted|sent)|no reply posted)\b/i.test(result.note));
+    if (result.ok !== true || "skipped" in result || "held" in result ||
+        result.dryRun === true || result.quiet === true || result.deferred === true || nothingPosted) {
+      const details = ["ok", "skipped", "held", "posted", "sent", "dryRun", "quiet", "deferred", "note", "error"]
+        .filter(key => key in result)
+        .map(key => `${key}=${JSON.stringify(result[key])}`)
+        .join("; ").slice(0, 300);
+      return { posted: false, error: `Ruckus delivery unconfirmed: ${details || "missing ok=true"}` };
+    }
+    return { posted: true, delivery: {
+      confirmation: "ruckus-send-response", confirmedAt: new Date().toISOString(),
+      ...(typeof result.chatId === "string" && result.chatId.trim() ? { chatId: result.chatId } : {}),
+    } };
   } catch (err) {
     return { posted: false, error: err instanceof Error ? err.message : String(err) };
   }

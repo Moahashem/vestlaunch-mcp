@@ -44,6 +44,8 @@ export interface AgentRunReport {
   durationMs?: number;
   /** Optional machine error detail (kept out of `summary`). */
   errorMessage?: string;
+  /** Structured evidence and readable report detail, not a substitute for status. */
+  payload?: Record<string, unknown>;
 }
 
 /** Resolve the ffl-crm base URL (no trailing slash). */
@@ -87,6 +89,7 @@ export async function logAgentRun(report: AgentRunReport): Promise<void> {
         tier: report.tier ?? "green",
         durationMs: report.durationMs,
         errorMessage: report.errorMessage,
+        payload: report.payload,
       }),
       signal: controller.signal,
     });
@@ -192,6 +195,8 @@ export interface SpendGuardOptions {
    * included. The predicate receives the raw hub row.
    */
   completionPredicate?: (row: { status?: string; summary?: string; payload?: unknown }) => boolean;
+  /** Only this predicate may suppress a retry; ignore legacy summaries/counts. */
+  completionPredicateOnly?: boolean;
 }
 
 /**
@@ -233,7 +238,7 @@ export async function shouldSkipRedundantKickoff(
     const workComplete = rows.some(
       (r) => typeof r?.summary === "string" && r.summary.startsWith(WORK_COMPLETE_PREFIX),
     );
-    if (workComplete) return true;
+    if (workComplete && !opts?.completionPredicateOnly) return true;
     if (opts?.completionPredicate) {
       const pred = opts.completionPredicate;
       const done = allRows.some((r) => {
@@ -246,6 +251,7 @@ export async function shouldSkipRedundantKickoff(
       });
       if (done) return true;
     }
+    if (opts?.completionPredicateOnly) return false;
 
     // 2. Not confirmed complete: the heal window (final slots) always runs —
     //    it is the retry + alert pass for a morning session that died mid-run.

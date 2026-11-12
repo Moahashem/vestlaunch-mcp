@@ -15,8 +15,60 @@
  *
  * Each case below is one of those failures, locked.
  */
-import { describe, it, expect } from "vitest";
-import { composeReport } from "../../api/recruiting-report.js";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { composeReport, postToRuckusChannel } from "../../api/recruiting-report.js";
+
+describe("postToRuckusChannel delivery confirmation", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubEnv("RUCKUS_SEND_TOKEN", "test-only-token");
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockReset();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+
+  it("requires an affirmative JSON delivery result", async () => {
+    fetchMock.mockResolvedValue(Response.json({ ok: true }));
+    expect(await postToRuckusChannel("Staff summary")).toEqual({ posted: true, delivery: {
+      confirmation: "ruckus-send-response", confirmedAt: expect.any(String),
+    } });
+  });
+
+  it("reports the disabled reason instead of recording a successful send", async () => {
+    fetchMock.mockResolvedValue(Response.json({ ok: false, skipped: "ruckus_disabled", note: "Ruckus is off. Nothing was posted." }));
+    const result = await postToRuckusChannel("Staff summary");
+    expect(result.posted).toBe(false);
+    expect(result.error).toContain("ruckus_disabled");
+    expect(result.error).toContain("Nothing was posted.");
+  });
+
+  it.each([
+    { ok: false }, {}, null, [], { ok: "true" },
+    { ok: true, skipped: "duplicate" }, { ok: true, skipped: false },
+    { ok: true, held: true }, { ok: true, posted: false },
+    { ok: true, note: "Nothing was posted." },
+    { ok: true, dryRun: true }, { ok: true, quiet: true }, { ok: true, deferred: true },
+    { ok: true, sent: false }, { ok: true, note: "Test post — not sent to any chat." },
+  ])("does not claim delivery for %j", async reply => {
+    fetchMock.mockResolvedValue(Response.json(reply));
+    expect(await postToRuckusChannel("Staff summary")).toEqual({ posted: false, error: expect.any(String) });
+  });
+
+  it.each(["", "not JSON", "<html>upstream error</html>"])("does not throw for an invalid success body: %j", async body => {
+    fetchMock.mockResolvedValue(new Response(body, { status: 200 }));
+    expect(await postToRuckusChannel("Staff summary")).toEqual({ posted: false, error: expect.stringContaining("JSON") });
+  });
+
+  it("preserves HTTP failure details", async () => {
+    fetchMock.mockResolvedValue(new Response("unavailable", { status: 503 }));
+    expect(await postToRuckusChannel("Staff summary")).toEqual({ posted: false, error: "HTTP 503: unavailable" });
+  });
+
+  it("returns network failures without throwing", async () => {
+    fetchMock.mockRejectedValue(new Error("connection failed"));
+    expect(await postToRuckusChannel("Staff summary")).toEqual({ posted: false, error: "connection failed" });
+  });
+});
 
 const DID = {
   block: "Did:\n- Invited 3 new applicants (1 by email, 2 by Indeed message)\n\n(counted from 3 send receipts)",

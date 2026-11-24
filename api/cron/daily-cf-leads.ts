@@ -1,6 +1,9 @@
 import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
+import { CF_LEADS_TOURS_ADDENDUM } from "../company-numbers-addenda";
 /**
- * Daily cron trigger for the FFL CF Leasing Daily Lead Counter agent (LeadSimple / Cranbrook).
+ * Daily cron trigger for the FFL CF Leasing Daily Lead Counter agent (Cranbrook).
+ * The counts come from VestLaunch (Cranbrook Rental Leads pipeline), not LeadSimple:
+ * the old VPS LeadSimple feed into ffl-crm is retired (Mo, 2026-11-24).
  *
  * Managed Agents is a runtime, not a scheduler (project D12) — this Vercel cron is
  * the external trigger. On each fire it (1) creates a Managed Agents session bound
@@ -11,11 +14,11 @@ import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
  * /api/v1/agent/run-status (agentKey 'cranbrook-cf-leads') so the dashboard + Ruckus can
  * see the morning pipeline fired. Best-effort: never breaks the run.
  *
- * PIPELINE ORDER (why 6:40 AM CT): the VPS LeadSimple fetcher runs ~5:15-8:15 AM CT and
- * pushes CF lead counts to ffl-crm; the Sales agent creates the day's tab at 6:00;
+ * PIPELINE ORDER (6:40 AM CT): the Sales agent creates the day's tab at 6:00;
  * Agent #2 (6:10), ShowMojo (6:20) and CFA (6:30) fill their rows; THIS agent reads
- * get_cf_lead_numbers and fills the CFA Leasing -> Leads row B35:E35 at 6:40 (+ retries).
- * The agent's own stale-gate refuses to write if the fetcher data isn't from today.
+ * get_cf_lead_numbers and fills the CFA Leasing -> Leads row B35:E35 plus the
+ * Tours row B36:D36 at 6:40 (+ retries). The agent's stale-gate still refuses to
+ * write when the endpoint says stale=true (VestLaunch database unreachable).
  *
  * WRITER-ONLY: the agent never creates the tab; if missing it stops and reports.
  * Idempotent via status cell A116 — retry fires are harmless.
@@ -57,8 +60,8 @@ const DEFAULT_PROMPT = [
   "create it — if it is missing, STOP and report. Check your status cell A116 first; if",
   "today is already done, report it complete (see FINAL STEP) and stop. Apply the gate: if stale=true write NOTHING and",
   "alert in A117. Otherwise write ONLY these cells: this_week→B35, this_month→C35,",
-  "last_month→D35, new_30d→E35 — never any other cell — then stamp status A116. Read",
-  "back B35:E35 and report exactly what was written and skipped.",
+  "last_month→D35, new_30d→E35, and tours.cells→B36:D36 — never any other cell — then stamp status A116. Read",
+  "back B35:E36 and report exactly what was written and skipped.",
   "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
   "or verified already done), call report_run_complete with agent_key 'cranbrook-cf-leads' and a one-line",
   "detail: it stands down today's remaining retry crons. Best-effort: if that tool is missing",
@@ -95,7 +98,7 @@ export default async function handler(
   const agentId = process.env.FFL_CF_LEADS_AGENT_ID;
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
-  const prompt = process.env.FFL_CF_LEADS_PROMPT?.trim() || DEFAULT_PROMPT;
+  const prompt = `${process.env.FFL_CF_LEADS_PROMPT?.trim() || DEFAULT_PROMPT}\n\n${CF_LEADS_TOURS_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

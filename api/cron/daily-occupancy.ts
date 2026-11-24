@@ -1,4 +1,5 @@
 import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
+import { OCCUPANCY_K4_ADDENDUM } from "../company-numbers-addenda";
 /**
  * Daily cron trigger for the FFL Daily Occupancy Counter (Managed Agent #2).
  *
@@ -96,7 +97,7 @@ export default async function handler(
   const agentId = process.env.FFL_OCCUPANCY_AGENT_ID;
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
-  const prompt = process.env.FFL_OCCUPANCY_PROMPT?.trim() || DEFAULT_PROMPT;
+  const prompt = `${process.env.FFL_OCCUPANCY_PROMPT?.trim() || DEFAULT_PROMPT}\n\n${OCCUPANCY_K4_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

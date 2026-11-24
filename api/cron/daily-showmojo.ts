@@ -1,4 +1,5 @@
 import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
+import { SHOWMOJO_FLAGS_ADDENDUM } from "../company-numbers-addenda";
 /**
  * Daily cron trigger for the FFL ShowMojo Agent (the Homes-on-market specialist).
  *
@@ -114,7 +115,7 @@ export default async function handler(
   const agentId = process.env.FFL_SHOWMOJO_AGENT_ID;
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
-  const prompt = process.env.FFL_SHOWMOJO_PROMPT?.trim() || DEFAULT_PROMPT;
+  const prompt = `${process.env.FFL_SHOWMOJO_PROMPT?.trim() || DEFAULT_PROMPT}\n\n${SHOWMOJO_FLAGS_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

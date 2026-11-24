@@ -49,6 +49,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { ONBOARDING_ORIENTATION_ADDENDUM } from "../company-numbers-addenda";
 import { logAgentRun, shouldSkipRedundantKickoff } from "../workforce-hub";
 
 export const config = { maxDuration: 60 };
@@ -71,7 +72,7 @@ const DEFAULT_PROMPT = [
   "status cell A120 FIRST: if it already shows roster=done for today, report it",
   "complete (see FINAL STEP) and stop. Otherwise write A49 (the title line with",
   "in_flight and stalled_count),",
-  "the row 50 headers, one row per roster entry across A51:K78 in the order given,",
+  "the row 50 headers, one row per roster entry across A51:L78 in the order given,",
   "and A79 (the overflow line, or blank when 28 rows or fewer). BLANK any unused",
   "rows through row 78 — today's tab is a copy of yesterday's, so stale owners",
   "would otherwise linger. HONOR THE SOURCE GATES: if sources.showmojo_ok is false",
@@ -117,7 +118,7 @@ export default async function handler(
   const agentId = process.env.FFL_ONBOARDING_AGENT_ID?.trim() || DEFAULT_AGENT_ID;
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
-  const prompt = process.env.FFL_ONBOARDING_PROMPT?.trim() || DEFAULT_PROMPT;
+  const prompt = `${process.env.FFL_ONBOARDING_PROMPT?.trim() || DEFAULT_PROMPT}\n\n${ONBOARDING_ORIENTATION_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

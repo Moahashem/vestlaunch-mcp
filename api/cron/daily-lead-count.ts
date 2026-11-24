@@ -39,7 +39,7 @@ import { directSheetsAddendum, usesDirectSheets } from "../company-numbers-sheet
  *   AGENT_OS_BASE_URL     — optional; ffl-crm base for the run-status report (default https://crm.vestlaunch.com)
  */
 
-import { CLEAR_STALE_ADDENDUM } from "../company-numbers-addenda";
+import { CLEAR_STALE_ADDENDUM, TEMPLATE_ADDENDUM } from "../company-numbers-addenda";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logAgentRun, shouldSkipRedundantKickoff } from "../workforce-hub";
 
@@ -148,7 +148,7 @@ export default async function handler(
   const basePrompt = process.env.FFL_DAILY_PROMPT?.trim() || DEFAULT_PROMPT;
   const prompt = usesDirectSheets("sales-lead-count")
     ? `${basePrompt}\n\n${directSheetsAddendum("sales-lead-count")}`
-    : `${basePrompt}\n\n${TAB_PLACEMENT_ADDENDUM}\n\n${CLEAR_STALE_ADDENDUM}\n\n${HOUSEKEEPING_ADDENDUM}`;
+    : `${basePrompt}\n\n${TAB_PLACEMENT_ADDENDUM}\n\n${CLEAR_STALE_ADDENDUM}\n\n${TEMPLATE_ADDENDUM}\n\n${HOUSEKEEPING_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

@@ -39,7 +39,7 @@ import { directSheetsAddendum } from "../company-numbers-sheets-rollout";
  * server.ts AND listed in /health (done in the same PR that added this file).
  */
 
-import { COMBINED_B16_ADDENDUM } from "../company-numbers-addenda";
+import { CFA_BOUNDARIES_ADDENDUM, COMBINED_B16_ADDENDUM } from "../company-numbers-addenda";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logAgentRun, shouldSkipRedundantKickoff } from "../workforce-hub";
 
@@ -58,7 +58,7 @@ const DEFAULT_PROMPT = [
   "create it — if it is missing, STOP and report. Check your status cell A112 first; if",
   "today is already done, report it complete (see FINAL STEP) and stop. Apply every gate: if stale=true write NOTHING and",
   "alert; skip null cells. Then write your cells per your write recipe (B5/F5/G5/H5,",
-  "B10:F10, B15, D15, E15 (evictions = leases under eviction) and B16 — never C15/F15) plus status A112. Read back everything you",
+  "B10:F10, B15, D15, E15 (evictions = leases under eviction), B16, and the boundary cells C5:E5, C15, F15, C16, F16) plus status A112. Read back everything you",
   "wrote and report exactly what was written and skipped.",
   "FINAL STEP — when (and only when) every item in your scope is done for today (written now",
   "or verified already done), call report_run_complete with agent_key 'cranbrook-cfa' and a one-line",
@@ -96,7 +96,7 @@ export default async function handler(
   const agentId = process.env.FFL_CFA_AGENT_ID;
   const environmentId = process.env.FFL_ENVIRONMENT_ID;
   const vaultId = process.env.FFL_VAULT_ID;
-  const prompt = `${process.env.FFL_CFA_PROMPT?.trim() || DEFAULT_PROMPT}\n\n${COMBINED_B16_ADDENDUM}`;
+  const prompt = `${process.env.FFL_CFA_PROMPT?.trim() || DEFAULT_PROMPT}\n\n${COMBINED_B16_ADDENDUM}\n\n${CFA_BOUNDARIES_ADDENDUM}`;
 
   const missing = [
     ["ANTHROPIC_API_KEY", apiKey],

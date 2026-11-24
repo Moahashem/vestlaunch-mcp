@@ -561,6 +561,11 @@ const FFL_OCC_TOOL_DESC =
   "accounting shells) and the 1201 Fannin office; every other unit is a real FFL door. Occupied = " +
   "unit status not matching /vacant/i. Returns { total_doors, occupied, vacant, occupancy_pct, " +
   "excluded_dummy_units, raw_total_units, excluded_properties, status_breakdown, as_of, source }. " +
+  "Also doors_added_this_month (K4: managed doors added to AppFolio this month; null => " +
+  "leave K4 blank; informational, never changes I4/J4). Mo 2026-11-24: total_doors (G4) = real " +
+  "homes under management only (no dummy, no leasing-only); net_doors_this_month (I4) = growth of " +
+  "managed homes since the start of the 1st (can be negative); net_doors_incl_listing_only (J4) = " +
+  "the same incl. leasing-only. Any null => leave that cell (and B4/F4/H4 when total_doors is null) BLANK. " +
   "Source = AppFolio rent_roll via /api/v1/analytics/ffl-portfolio. No arguments. Read-only.";
 const FFL_OCC_TOOL_SCHEMA = {
   type: "object" as const,
@@ -578,8 +583,11 @@ async function getFflOccupancy(cfg: Cfg): Promise<unknown> {
     );
   }
   const d = resp.data;
-  if (!d || typeof d !== "object" || typeof (d as Record<string, unknown>).total_doors !== "number") {
-    throw new Error("ffl-portfolio endpoint returned an unexpected shape (no numeric total_doors).");
+  // 2026-11-24: total_doors is null (=> leave G4/B4/F4/H4 BLANK) when leasing-only homes
+  // could not be identified this run; only a missing or non-numeric non-null value is a bad shape.
+  const td = d && typeof d === "object" ? (d as Record<string, unknown>).total_doors : undefined;
+  if (!d || typeof d !== "object" || !(typeof td === "number" || td === null)) {
+    throw new Error("ffl-portfolio endpoint returned an unexpected shape (total_doors must be a number or null).");
   }
   return { ...(d as Record<string, unknown>), source: "native:/api/v1/analytics/ffl-portfolio" };
 }
@@ -906,6 +914,8 @@ const FFL_HOMES_TOOL_DESC =
   "window, cells, as_of, source }. C20 is a blank separator (never written). IMPORTANT: if " +
   "showmojo_diagnostics.ok is false or auth_style is null, the ShowMojo token/header failed - " +
   "A20/B20 read 0 and D20 is over-counted; do NOT write the sheet in that case. " +
+  "to_list_block lines may end with '— FLAG: ...' when a to-list unit looks tenant-occupied " +
+  "(not_on_market_flags); write the block verbatim. Flagged units still count in D20/E20. " +
   "Source = /api/v1/analytics/ffl-homes. No arguments. Read-only.";
 const FFL_HOMES_TOOL_SCHEMA = {
   type: "object" as const,
@@ -942,7 +952,9 @@ const FFL_ONBOARDING_TOOL_DESC =
   "complete or not. Returns { in_flight, stalled_count, rows, exited, stall_thresholds, sources, " +
   "diagnostics, as_of, source }. Each row: { ownerName, propertyAddress, signedAt, daysSinceSigned, " +
   "intake ('done' | '<n>%' | 'not started'), intakeDoneAt, orientation, inLeadSimple, onMarket, " +
-  "pmOnlyWaiting, rented, stalled ({ stage, label, daysOverdue } or null), serviceTypeAssumed }. " +
+  "pmOnlyWaiting, rented, stalled ({ stage, label, daysOverdue } or null), serviceTypeAssumed, " +
+  "orientationHeld (column L: write ☑ when true, ☐ when false) }. Rows whose management end date " +
+  "has passed are dropped automatically. " +
   "Rows are pre-sorted worst-first (most overdue, then longest-signed), so truncating the list " +
   "only ever drops HEALTHY rows. IMPORTANT: honour sources - if sources.showmojo_ok is false, the " +
   "On Market column is UNKNOWN, not empty; leave it alone rather than writing a blank. Same for " +
@@ -1153,9 +1165,10 @@ async function getCfaNumbers(cfg: Cfg): Promise<unknown> {
 }
 
 // --- SMART TOOL: get_cf_lead_numbers ---
-// Thin-agent / smart-tools (D13). Returns the Cranbrook "CF Leasing Leads" (LeadSimple)
-// lead counts for the Company Numbers "CFA Leasing -> Leads" row (B35:E35). LeadSimple has
-// NO counting API: a fetcher on the FFL VPS logs in headlessly each morning, reads the
+// Thin-agent / smart-tools (D13). Returns the Cranbrook "CF Leasing Leads" counts for the
+// Company Numbers "CFA Leasing -> Leads" row (B35:E35) and the Tours row (B36:D36), computed
+// by ffl-crm from VestLaunch's Cranbrook Rental Leads pipeline (no longer LeadSimple; the
+// VPS LeadSimple feed is retired, Mo 2026-11-24). (Definition continues at the tool below.)
 // --- SMART TOOLS: get_leasing_triage / act_leasing_triage ---
 // The cloud triage surface for the Cranbrook AI leasing agent (2026-08-30,
 // Mo: "I don't want it relying on my mac"). The scheduled morning triage
@@ -1566,17 +1579,17 @@ async function setOfficeClosure(cfg: Cfg, rawArgs: Record<string, unknown>): Pro
   return { ...(resp.data as Record<string, unknown>), source: "native:/api/v1/analytics/leasing-office-closures" };
 }
 
-// server-computed Count per window, and pushes the numbers to ffl-crm; this reads
-// /api/v1/analytics/cf-lead-numbers - no fallback. READ-ONLY.
+// This reads /api/v1/analytics/cf-lead-numbers - no fallback. READ-ONLY.
 const CF_LEADS_TOOL_NAME = "get_cf_lead_numbers";
 const CF_LEADS_TOOL_DESC =
-  "Smart server-side relay: returns the Cranbrook 'CF Leasing Leads' (LeadSimple) lead counts " +
-  "for the Company Numbers 'CFA Leasing -> Leads' row - this_week (B35, Sunday-start), this_month " +
-  "(C35), last_month (D35), new_30d (E35 = in 'New' stage created last 30 days). Definition: leads " +
-  "CREATED in window, all sources, excluding the 'Doesn't Qualify' stage. Data comes from the " +
-  "pre-dawn VPS LeadSimple fetcher via ffl-crm. CRITICAL: response includes `stale` - when " +
-  "stale=true the data is NOT from today (America/Chicago) and the agent MUST NOT write any cell " +
-  "(write nothing + flag). Returns { cells, stale, ct_date, today_ct, fetched_at_ct, definition }. " +
+  "Smart server-side relay: returns the Cranbrook 'CF Leasing Leads' counts for the Company " +
+  "Numbers 'CFA Leasing -> Leads' row - this_week (B35, Sunday-start), this_month (C35), " +
+  "last_month (D35), new_30d (E35 = VestLaunch leads still in New Inquiry, created last 30 days) - " +
+  "plus tours.cells for the Tours row (B36 this week, C36 this month, D36 last month; null => leave " +
+  "B36:D36 blank). Computed by ffl-crm from VestLaunch's Cranbrook Rental Leads pipeline, every " +
+  "source, minus test, staff, duplicate and spam leads - NOT LeadSimple. CRITICAL: response includes " +
+  "`stale` - when stale=true the agent MUST NOT write any cell (write nothing + flag). Returns " +
+  "{ cells, tours, stale, ct_date, today_ct, fetched_at_ct, definition }. " +
   "Source = /api/v1/analytics/cf-lead-numbers. No arguments. Read-only.";
 const CF_LEADS_TOOL_SCHEMA = {
   type: "object" as const,
@@ -1590,8 +1603,7 @@ async function getCfLeadNumbers(cfg: Cfg): Promise<unknown> {
     throw new Error(
       `cf-lead-numbers endpoint failed (HTTP ${resp.statusCode}): ${resp.error}. ` +
         "This tool requires GET /api/v1/analytics/cf-lead-numbers (ffl-crm) to be deployed, the Bearer " +
-        "key to have scope properties:read (or *), and the VPS LeadSimple fetcher to have pushed at " +
-        "least once (check /opt/ffl-resman-fetcher/last-run-leadsimple.json on the VPS).",
+        "key to have scope properties:read (or *).",
     );
   }
   const d = resp.data;

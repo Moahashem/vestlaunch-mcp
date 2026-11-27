@@ -18,7 +18,7 @@
  *   WRITE send_recruiting_invite    — ONE fixed template, hard-coded role→link
  *                                     map, server-ENFORCED dedup + denylist +
  *                                     daily cap (Mo's choice 2026-08-17)
- *   WRITE send_watchdog_alert       — email Mo when the browser half is stale
+ *   WRITE send_watchdog_alert       — email Mo when a channel is unreadable or needs a human
  *   READ  get_recruiting_state      — shared state (ffl-crm Workforce Hub)
  *   WRITE update_recruiting_state   — same
  *   WRITE report_recruiting_run     — run-status row for the AI OS dashboard +
@@ -297,9 +297,10 @@ const TOOLS: ToolDef[] = [
   {
     name: "send_watchdog_alert",
     description:
-      "Email Mo a watchdog alert (fixed recipient, capped at 3/day). Use when the browser half " +
-      "(LinkedIn/Indeed) hasn't run in >3 days, when a channel is unreadable, or when something " +
-      "needs a human. Args: { reason (one line), detail? }.",
+      "Email Mo a watchdog alert (fixed recipient, capped at 3/day). Use when a channel is " +
+      "unreadable or when something needs a human. The LinkedIn browser half is retired " +
+      "(Mo, 2026-11-27): alerts about it or last_run_browser are refused. " +
+      "Args: { reason (one line), detail? }.",
     inputSchema: {
       type: "object",
       properties: {

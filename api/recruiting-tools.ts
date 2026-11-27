@@ -2478,7 +2478,27 @@ export async function getTodaySendReceipts(): Promise<TodayReceipts> {
 
 // ───────────────────────── watchdog alert ─────────────────────────
 
+/**
+ * The Mac browser half (LinkedIn) was retired by Mo on 2026-11-27: the LinkedIn
+ * posting is closed and he does not want work that depends on his Mac. Its
+ * staleness alert had emailed him daily since Nov 25. The kickoff prompt tells
+ * the agent to stop, but the Console system prompt still carries the old
+ * ">3 days → alert" step, so the refusal lives here, server-side. Every other
+ * watchdog alert (unreadable channel, needs-a-human) still sends.
+ */
+const RETIRED_BROWSER_HALF = /browser[\s-]*half|last_run_browser|linked\s*in/i;
+
+export function isRetiredBrowserHalfAlert(reason: string, detail?: string): boolean {
+  return RETIRED_BROWSER_HALF.test(`${reason}\n${detail ?? ""}`);
+}
+
 export async function sendWatchdogAlert(reason: string, detail?: string): Promise<Record<string, unknown>> {
+  if (isRetiredBrowserHalfAlert(reason, detail)) {
+    return {
+      sent: false,
+      reason: "The LinkedIn browser half was retired by Mo on 2026-11-27; it has no watchdog. Do not retry or report it.",
+    };
+  }
   const day = chicagoDateStamp();
   const logKey = `watchdog_sent_${day}`;
   const existing = ((await readStateKey(logKey)) ?? []) as unknown[];

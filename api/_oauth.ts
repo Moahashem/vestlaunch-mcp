@@ -238,3 +238,58 @@ export async function validateCrmKey(
     clearTimeout(timer);
   }
 }
+
+// ───────────────────────── redirect_uri allowlist ─────────────────────────
+
+/**
+ * Where /authorize may send an authorization code. Without this check, anyone
+ * could build a sign-in link that returns the code to their own site, have a
+ * person paste their key, and redeem the code with their own PKCE verifier.
+ *
+ * Allowed by default:
+ *   - Claude's hosted connector callback on claude.ai and claude.com
+ *   - loopback http on any port (Claude Code, Claude Desktop, local MCP clients)
+ * Extra entries go in OAUTH_REDIRECT_ALLOWLIST (comma-separated). Each entry is
+ * either an exact redirect URI or an https origin (scheme + host) that allows
+ * any path on that origin.
+ *
+ * Refresh tokens never pass through /authorize, so existing connections keep
+ * working; this only gates new sign-ins.
+ */
+const DEFAULT_REDIRECT_PREFIXES = [
+  "https://claude.ai/api/mcp/auth_callback",
+  "https://claude.com/api/mcp/auth_callback",
+];
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+export function redirectUriAllowed(
+  redirectUri: string,
+  extraRaw: string = process.env.OAUTH_REDIRECT_ALLOWLIST ?? "",
+): boolean {
+  let u: URL;
+  try {
+    u = new URL(redirectUri);
+  } catch {
+    return false;
+  }
+  if (u.username || u.password) return false;
+
+  if (u.protocol === "http:" && LOOPBACK_HOSTS.has(u.hostname)) return true;
+  if (u.protocol !== "https:") return false;
+
+  const noQuery = `${u.origin}${u.pathname}`;
+  if (DEFAULT_REDIRECT_PREFIXES.includes(noQuery)) return true;
+
+  for (const entry of extraRaw.split(",").map((s) => s.trim()).filter(Boolean)) {
+    let e: URL;
+    try {
+      e = new URL(entry);
+    } catch {
+      continue;
+    }
+    if (e.protocol !== "https:") continue;
+    const originOnly = e.pathname === "/" && !entry.replace(/\/+$/, "").slice(e.origin.length);
+    if (originOnly ? u.origin === e.origin : noQuery === `${e.origin}${e.pathname}`) return true;
+  }
+  return false;
+}

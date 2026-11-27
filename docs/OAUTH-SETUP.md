@@ -1,80 +1,69 @@
-# VestLaunch MCP — Sign-In (OAuth) Setup
+# VestLaunch MCP: connecting Claude with sign in
 
-**Plain-language guide for Mo. Last updated 2026-07-14.**
+**Last updated 2026-11-27.** Replaces the July WorkOS plan, which was dropped.
 
-## The problem we're fixing
+## How it works
 
-When you add VestLaunch as a custom connector in Claude Desktop and click **Connect**, you get "an error, couldn't connect." That's because Claude's connector dialog has nowhere to paste a secret key — the modern connector standard expects a real **sign-in flow** ("Connect" → a login page opens → you approve → Claude gets its access automatically). Our server doesn't offer that login flow yet, so the handshake fails before it starts.
+The hosted server at `https://vestlaunch-mcp.vercel.app/api/mcp` runs its own
+OAuth 2.1 sign in (files `api/authorize.ts`, `api/token.ts`,
+`api/oauth-register.ts`, `api/_oauth.ts`). No third party is involved.
 
-## The decision (locked)
+1. You add the URL as a custom connector in Claude and press **Connect**.
+2. Claude registers itself and opens the VestLaunch sign in page.
+3. You paste a VestLaunch API key (`ffl_live_...`). The server checks it with
+   the CRM (`/api/v1/me`) and sends Claude back an encrypted code.
+4. Claude trades the code for an access token (1 hour) and a refresh token
+   (30 days, rotated on each use). Both are encrypted and carry the key inside;
+   the key itself never goes back to Claude.
+5. Every tool call uses that key, so Claude sees exactly the tools and data the
+   key allows. Revoke the key in VestLaunch and access stops at once.
 
-You chose the **managed auth provider** path — the right long-term option, no shortcuts.
+Only `OAUTH_JWE_SECRET` and `VESTLAUNCH_BASE_URL` are needed in Vercel. Both
+are set.
 
-In plain terms: we do **not** hand-build a login system (that's the risky, security-sensitive part that companies get wrong). Instead we plug in a specialist whose entire job is secure sign-in: **WorkOS AuthKit**. It's free at our scale.
+## One connector per workspace
 
-Two pieces, clean division of labor:
+A VestLaunch key belongs to one workspace, and the CRM refuses any request that
+names another workspace or business. So FFL and Cranbrook stay apart by using
+one key and one connector for each:
 
-| Piece | Who | Job |
-|---|---|---|
-| **WorkOS AuthKit** | the specialist | Runs the login page, "Allow VestLaunch?" consent screen, and issues the secure access token. |
-| **vestlaunch-mcp** (our server) | us | Checks that WorkOS-issued token is real, then talks to the CRM on the user's behalf. |
-
-Think of WorkOS as the bouncer who checks IDs at the door, and our MCP server as the room that only lets in people the bouncer already cleared.
-
-## What only YOU can do (owner-only steps)
-
-I can write all the code, but four things require your login and I must not do them for you. Do these in any order — they can happen in parallel with me writing the code.
-
-### 1. Create the WorkOS account
-- Go to **workos.com**, sign up (free), create a project. Name it something like `VestLaunch`.
-
-### 2. Turn on AuthKit as an MCP auth server
-- In the WorkOS dashboard, open **AuthKit** and enable it.
-- Enable **Dynamic Client Registration (DCR)** — this is the setting that lets Claude Desktop connect without you pre-registering it. (WorkOS → AuthKit → Configuration.)
-- Add a redirect/callback for AuthKit's hosted UI if it asks — the default AuthKit domain is fine.
-
-### 3. Capture these values (you'll only see the API key once)
-From the WorkOS dashboard, copy down:
-- **AuthKit domain** — looks like `https://your-project.authkit.app`
-- **WorkOS Client ID** — starts with `client_...`
-- **WorkOS API Key** — starts with `sk_live_...` (⚠️ shown once — copy it immediately)
-
-### 4. Add them to Vercel
-In the Vercel project for `vestlaunch-mcp` → Settings → Environment Variables, add:
-
-| Name | Value |
+| Connector name in Claude | Key created in workspace |
 |---|---|
-| `WORKOS_AUTHKIT_DOMAIN` | the AuthKit domain from step 3 |
-| `WORKOS_CLIENT_ID` | `client_...` |
-| `WORKOS_API_KEY` | `sk_live_...` |
-| `MCP_USER_KEY_MAP` | see below |
+| VestLaunch FFL Sales | landlord-prospecting |
+| VestLaunch FFL Ops | ffl-ops |
+| VestLaunch Cranbrook | cranbrook-leasing |
 
-**`MCP_USER_KEY_MAP`** is how the server knows which CRM key belongs to which signed-in person. It's a small JSON object mapping each person's login email to their CRM `ffl_live_` key. Example:
+Give each connector its own name so its tools stay labeled by workspace. If
+Claude won't take a second connector at the same URL, add a label to the URL,
+for example `https://vestlaunch-mcp.vercel.app/api/mcp?workspace=cranbrook`.
+The server ignores that parameter; the key alone decides the workspace.
 
-```json
-{"mo@flatfeelandlord.com":"ffl_live_XXXX","sam@flatfeelandlord.com":"ffl_live_YYYY"}
-```
+## Making a key for Claude
 
-Paste it as one line. When a new teammate needs access, you mint their CRM key in VestLaunch (Settings → API Keys) and add one line here — no code change needed.
+In VestLaunch, switch to the workspace, open **Settings > API Keys**, and
+create a key:
 
-## The one GitHub blocker
+- **Name:** `claude-main-chat-<workspace>`
+- **Type:** agent
+- **Access:** Full API access (everything in that workspace)
+- **Expires in:** 1 year
 
-The access token I have for GitHub is **read-only** — I can write the code into your project folder, but I cannot push it or open a pull request. So either:
-- **You push it** (I'll tell you exactly what changed), or
-- You give me a **write-scoped** GitHub token and I'll open a PR (authored as you, never self-merged).
+The key is shown once. Paste it straight into the Claude sign in page; it does
+not need to be saved anywhere else.
 
-## How it'll work once live (what you and Sam will see)
+## What stays guarded on the server
 
-1. Add VestLaunch as a custom connector in Claude Desktop, click **Connect**.
-2. A WorkOS login page opens. Sign in with your work email.
-3. A consent screen: "Allow VestLaunch to access your CRM?" → Allow.
-4. Done. Claude is connected — no keys, no copy-paste, ever.
+- Delete tools are off except the names in `VESTLAUNCH_DELETE_ALLOWLIST`
+  (default: `delete_contact`).
+- Campaign blasts still need a test send and confirmation code (CRM side).
+- The sign in page only returns codes to approved apps: Claude's callbacks on
+  `claude.ai` and `claude.com`, and loopback addresses for local clients. Add
+  any other app's redirect URI or https origin to `OAUTH_REDIRECT_ALLOWLIST`
+  (comma separated). Existing connections refresh without going through this
+  page, so they are not affected.
 
-## What I'm building on the code side (for reference)
+## Other ways to connect
 
-- A discovery endpoint (`/.well-known/oauth-protected-resource`) that tells Claude "go to WorkOS to log in."
-- Token checking: every request's token is verified against WorkOS before we do anything.
-- Identity → CRM key mapping using `MCP_USER_KEY_MAP`, so each person acts as themselves in the CRM.
-- The old direct-key method keeps working, so nothing breaks during the switch.
-
-Nothing here touches the CRM itself, and no security-sensitive login code is hand-written by us — WorkOS handles that.
+Agents that can send a header can skip sign in and use their own key as
+`Authorization: Bearer ffl_live_...` on the same URL. The legacy shared
+`MCP_BEARER_TOKEN` still works for older agents.

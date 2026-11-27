@@ -23,7 +23,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { CRM_KEY_PREFIX, mintAuthCode, validateCrmKey } from "./_oauth";
+import { CRM_KEY_PREFIX, mintAuthCode, redirectUriAllowed, validateCrmKey } from "./_oauth";
 
 export const config = { maxDuration: 30 };
 
@@ -143,6 +143,23 @@ function loginPage(pr: AuthParams, error?: string): string {
 </html>`;
 }
 
+/**
+ * A sign-in request whose redirect_uri is not an approved app. Shown with no
+ * form, so a key is never typed into a request that would hand the resulting
+ * access to an unknown site.
+ */
+function sendBlocked(res: ServerResponse): void {
+  sendHtml(
+    res,
+    400,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connection not allowed</title></head>` +
+      `<body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;max-width:460px;margin:15vh auto;padding:24px;line-height:1.5">` +
+      `<h1 style="font-size:20px">This app can't connect to VestLaunch</h1>` +
+      `<p>This sign-in request did not come from an approved app, so it was stopped. Do not enter your VestLaunch key here.</p>` +
+      `</body></html>`,
+  );
+}
+
 function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.statusCode = status;
   res.setHeader("content-type", "text/html; charset=utf-8");
@@ -169,6 +186,10 @@ export default async function handler(
       );
       return;
     }
+    if (!redirectUriAllowed(pr.redirectUri)) {
+      sendBlocked(res);
+      return;
+    }
     sendHtml(res, 200, loginPage(pr));
     return;
   }
@@ -181,6 +202,11 @@ export default async function handler(
 
     if (!pr.redirectUri) {
       sendHtml(res, 400, loginPage(pr, "Missing redirect_uri."));
+      return;
+    }
+    // Re-checked on POST: the form's hidden fields are client-controlled.
+    if (!redirectUriAllowed(pr.redirectUri)) {
+      sendBlocked(res);
       return;
     }
     if (!pr.codeChallenge) {
